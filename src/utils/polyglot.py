@@ -1,12 +1,9 @@
 """MongoDB -> AuraDB polyglot persistence utility functions"""
 
 # Imports
-import json
 from collections import defaultdict
-from datetime import datetime
 from loguru import logger
-from bson import ObjectId
-from .embedding import vectorise_many
+from .embedders import GemmaEmbedder
 
 
 collection_label_map = {
@@ -26,143 +23,6 @@ collection_label_map = {
     "club_badges": "ClubBadge",
     "countries": "Country",
 }
-
-
-def load_sync_log(log_path):
-    """Load sync log and last sync time from log file."""
-    try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            sync_log = json.load(f)
-            if not isinstance(sync_log, list):
-                sync_log = []
-    except (FileNotFoundError, json.decoder.JSONDecodeError):
-        sync_log = []
-
-    if sync_log:
-        ts = sync_log[-1].get("timestamp")
-        try:
-            last_sync_time = datetime.fromisoformat(ts)
-        except (TypeError, ValueError):
-            last_sync_time = datetime(2026, 1, 1)
-    else:
-        last_sync_time = datetime(2026, 1, 1)
-
-    return sync_log, last_sync_time
-
-
-def update_sync_log(sync_log, timestamp, log_path):
-    """Save last sync time to sync log."""
-    run = len(sync_log)
-    sync_log.append({
-        "run": run,
-        "timestamp": timestamp.isoformat()
-    })
-
-    with open(log_path, "w", encoding="utf-8") as f:
-        json.dump(sync_log, f, indent=2)
-
-
-def safe_value(v):
-    """Convert ObjectIds to strings and datetime to ISO format."""
-    if isinstance(v, list):
-        return [safe_value(item) for item in v]
-
-    if isinstance(v, dict):
-        return {k: safe_value(val) for k, val in v.items()}
-
-    if isinstance(v, ObjectId):
-        return str(v)
-
-    if isinstance(v, datetime):
-        return v.isoformat()
-
-    return v
-
-
-def remove_nested_dicts(entry):
-    """Remove keys whose values are dicts or lists of dicts."""
-    for key in list(entry.keys()):
-        value = entry[key]
-
-        if isinstance(value, dict):
-            entry.pop(key)
-            continue
-
-        if isinstance(value, list) and any(isinstance(i, dict) for i in value):
-            entry.pop(key)
-
-    return entry
-
-
-def flatten_document(entry, field_map):
-    """Flatten document using a field map."""
-    entry = entry.copy()
-    output_lists = defaultdict(list)
-
-    for out_field, path in field_map.items():
-        parent, child = path.split(".")
-        value = entry.get(parent, [])
-
-        # Parent is a dict
-        if isinstance(value, dict):
-            if child in value:
-                output_lists[out_field].append(safe_value(value[child]))
-
-        # Parent is a list of dicts
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict) and child in item:
-                    output_lists[out_field].append(safe_value(item[child]))
-
-    # Insert flattened fields and remove nested dicts
-    entry.update(output_lists)
-    reassigned = [k for k, v in field_map.items() if k == v.split(".")[0]]
-    field_map = {k: v for k, v in field_map.items() if v.split(".")[0] not in reassigned}
-    for path in field_map.values():
-        if "." in str(path):
-            parent = path.split(".")[0]
-            entry.pop(parent, None)
-
-    return entry
-
-
-def fetch_from_mongo(collection, exclude_fields=None, field_map=None, since=None):
-    """
-    Fetch documents updated since 'since' with field exclusions and flattening.
-    """
-    if exclude_fields is None:
-        exclude_fields = []
-    if field_map is None:
-        field_map = {}
-
-    # Build query
-    query = {"updated_at": {"$gt": since}} if since else {}
-    projection = {field: 0 for field in exclude_fields}
-
-    docs = list(collection.find(query, projection))
-
-    flattened = []
-    for doc in docs:
-        # Use existing safe_value to handle BSON types
-        doc = {k: safe_value(v) for k, v in doc.items()}
-
-        # Use existing flattening logic
-        flat = flatten_document(doc, field_map)
-        flattened.append(flat)
-
-    logger.success(f"Fetched {len(flattened)} updated documents from {collection.name}.")
-    return flattened
-
-
-def fetch_club_period_books(db):
-    """Find the books selected by clubs to read and the selection periods."""
-    cpb = fetch_from_mongo(db["club_period_books"])
-    crp = fetch_from_mongo(db["club_reading_periods"])
-
-    for i in cpb:
-        i["period_name"] = [k["name"] for k in crp if k["_id"] == i["period_id"]][0]
-
-    return cpb
 
 
 def process_books(books):
@@ -226,7 +86,8 @@ def process_books(books):
             continue
 
     if descriptions:
-        embeddings = vectorise_many(descriptions)
+        model = GemmaEmbedder.instance()
+        embeddings = model.vectorise_many(descriptions)
         for i, book in enumerate(valid_books):
             book["description_embedding"] = embeddings[i]
 
@@ -597,18 +458,17 @@ def book_awards_relationships(tx, updated_books, award_rows):
     logger.info(f"Created or updated {len(updated_book_ids)} Book-Award relationships")
 
 
-def club_book_relationships(tx, db):
+def club_book_relationships(tx, club_period_books):
     """
     Create SELECTED_FOR_PERIOD relationships between Club and Book.
     Refresh club selections by pruning specific club/book/period triples.
     """
-    cpb = fetch_club_period_books(db)
-    if not cpb:
+    if not club_period_books:
         return
 
     # Prune triples found in the delta
     prune_rows = [{"club_id": r["club_id"], "book_id": r["book_id"], "period": r["period_name"]}
-                  for r in cpb]
+                  for r in club_period_books]
     prune_query = """
     UNWIND $rows AS row
     MATCH (c:Club {_id: row.club_id})-[r:SELECTED_FOR_PERIOD]->(b:Book {_id: row.book_id})
@@ -619,7 +479,7 @@ def club_book_relationships(tx, db):
 
     # Merge only currently 'selected' books
     merge_rows = []
-    for row in cpb:
+    for row in club_period_books:
         if row["selection_status"] == "selected":
             merge_rows.append({
                 "club_id": row["club_id"], "book_id": row["book_id"],

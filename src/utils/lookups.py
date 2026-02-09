@@ -1,39 +1,46 @@
 """Lookup utlity functions"""
 
-# Import modules
-import os
-import json
+# Imports
 from loguru import logger
-from src.config import RAW_COLLECTIONS_DIR
 from .parsers import to_int
 
 
-# Load lookup collections from disk
-def load_lookup_data(lookup_registry: dict) -> dict:
+# Load lookup collections
+def load_lookup_data(db, lookup_registry: dict) -> dict:
     """
-    Loads JSON collections from disk and builds lookup maps
-    based on the registry's field and get configuration.
+    Builds lookup maps by fetching directly from MongoDB.
     """
     lookup_data = {}
 
     for name, config in lookup_registry.items():
-        path = os.path.join(RAW_COLLECTIONS_DIR, f"{name}.json")
-        with open(path, encoding="utf-8") as f:
-            collection = json.load(f)
-
+        # Access the collection in the staging database
+        collection = db[name]
         string_field = config["field"]
         get_fields = config["get"]
+
+        # Build projection for efficiency
+        projection = {string_field: 1}
+        if isinstance(get_fields, str):
+            projection[get_fields] = 1
+        else:
+            for f in get_fields:
+                projection[f] = 1
+
+        # Fetch the full lookup set from MongoDB
+        cursor = collection.find({}, projection)
 
         if isinstance(get_fields, str):
             lookup_data[name] = {
                 doc[string_field]: doc.get(get_fields)
-                for doc in collection if string_field in doc
+                for doc in cursor if string_field in doc
             }
         else:
             lookup_data[name] = {
                 doc[string_field]: {field: doc.get(field) for field in get_fields}
-                for doc in collection if string_field in doc
+                for doc in cursor if string_field in doc
             }
+
+        logger.debug(f"Loaded {len(lookup_data[name])} entries into '{name}' lookup map.")
 
     return lookup_data
 

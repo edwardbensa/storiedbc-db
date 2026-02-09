@@ -1,12 +1,14 @@
-# import modules
+"""Key rotation script"""
+
+# Imports
 from loguru import logger
 from pymongo.errors import ConnectionFailure, ConfigurationError
-from src.db.utils.connectors import connect_mongodb
-from src.db.utils.security import decrypt_field, encrypt_field, latest_key_version
+from src.utils.connectors import connect_mongodb
+from src.utils.security import decrypt_field, encrypt_field, latest_key_version
 
 
 # Connect to MongoDB
-db, client = connect_mongodb()
+db = connect_mongodb()
 users = db["users"]
 
 # Fields to rotate

@@ -1,36 +1,48 @@
 """Connection utility functions"""
 
 # Imports
-import os
 import sys
-import json
+import time
+import functools
 from typing import Tuple
+from datetime import datetime
 import gspread
+import requests
+from requests.exceptions import RequestException
 from oauth2client.service_account import ServiceAccountCredentials
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import AzureError, ResourceNotFoundError
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError, AutoReconnect, NetworkTimeout, ExecutionTimeout
 from pymongo.errors import ConnectionFailure, ConfigurationError
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable, AuthError
 from loguru import logger
-from src.config import (ETL_LOGS_DIR, gsheet_cred, mongodb_uri, azure_str,
+from src.config import (gsheet_cred, mongodb_uri, azure_str,
                         neo4j_uri, neo4j_user, neo4j_pwd)
 
 
-def connect_mongodb():
+def connect_mongodb(db_name="main"):
     """
-    Connects to the MongoDB database and returns the database object.
+    Connects to MongoDB and returns specified database object.
     """
+    if db_name not in ["main", "staging", "etl_metadata"]:
+        raise ValueError("The database name must be 'main', 'staging', or 'etl_metadata'.")
     try:
         client = MongoClient(mongodb_uri)
-        db = client["book_club"]
+        db = client[db_name]
         client.admin.command('ping')
-        logger.info("Successfully connected to MongoDB")
-        return db, client
+        logger.info(f"Successfully connected to MongoDB: {db_name} database.")
+        return db
     except (ConnectionFailure, ConfigurationError)  as e:
-        logger.error(f"Failed to connect to MongoDB: {e}")
+        logger.error(f"Failed to connect to MongoDB: {e}.")
         sys.exit()
+
+def close_mongodb():
+    """Close MongoDB client."""
+    client = MongoClient(mongodb_uri)
+    client.close()
+    logger.info("MongoDB connection closed.")
 
 def connect_auradb():
     """
@@ -54,7 +66,7 @@ def connect_auradb():
 
 def connect_azure_blob():
     """
-    Connects to Azure Blob Storage and returns the BlobServiceClient.
+    Connects to Azure Blob Storage and returns BlobServiceClient.
     """
     try:
         blob_service_client = BlobServiceClient.from_connection_string(azure_str) # type: ignore
@@ -80,7 +92,7 @@ def make_blob_public(container_client, blob_name):
         logger.error(f"Failed to set blob '{blob_name}' to public: {e}")
 
 
-def connect_googlesheet():
+def connect_gsheet():
     """
     Connects to Book Club DB and returns the spreadsheet.
     """
@@ -96,6 +108,7 @@ def connect_googlesheet():
         return spreadsheet
     except gspread.exceptions.APIError as e:
         logger.error(f"APIError for sheet 'Book Club DB': {e}")
+        raise
 
 
 def wipe_container(blob_service_client, container_name: str,
@@ -169,61 +182,107 @@ def wipe_container(blob_service_client, container_name: str,
         return False, deleted_count
 
 
-def sync_images(blob_service_client, container_name, source_directory, img_type):
+def sync_images(db, blob_service_client, container_name, img_type, url_map):
     """
-    Synchronizes image files between a local directory and an Azure Blob Storage container.
+    Syncs images directly from source URLs to Azure Blob Storage container.
     Uploads new files and deletes obsolete files based on log comparisons.
+    URL map: { filename: source_url }
     """
     if img_type not in ["user", "club", "cover"]:
         raise ValueError("Type must be either 'user', 'club', or 'cover'")
+    img_type_map = {"user": "user_dp", "club": "club_dp", "cover": "cover_art"}
+    img_type = img_type_map[img_type]
 
-    log_filename = f"{img_type}s_imagefiles_log.json"
-    log_path = os.path.join(ETL_LOGS_DIR, log_filename)
+    container_client = blob_service_client.get_container_client(container_name)
 
-    # Load latest log entry
+    # Fetch known state from MongoDB
+    log_doc = db["metadata"].find_one({"_id": f"inventory_{img_type}"})
+    known_filenames = set(log_doc["filenames"]) if log_doc else set()
+    desired_filenames = set(url_map.keys())
+
+    # Identify deltas
+    to_upload = desired_filenames - known_filenames
+    to_delete = known_filenames - desired_filenames
+
+    # Handle deletions in Azure
     try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            log_data = json.load(f)
-            latest_filenames = set(log_data[-1]["filenames"]) if log_data else set()
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logger.error(f"Failed to load log file: {e}")
-        return
-
-    try:
-        container_client = blob_service_client.get_container_client(container_name)
-        logger.info(f"Syncing container '{container_name}' with local dir '{source_directory}'...")
-
-        # List existing blobs in container
-        existing_blobs = set(blob.name for blob in container_client.list_blobs())
-
-        # Delete blobs not in latest log
-        blobs_to_delete = [name for name in existing_blobs if name not in latest_filenames]
-        for filename in blobs_to_delete:
+        for filename in to_delete:
             try:
-                blob_client = container_client.get_blob_client(filename)
-                blob_client.delete_blob()
-                logger.debug(f"Deleted obsolete blob: {filename}")
-            except AzureError as e:
-                logger.warning(f"Failed to delete blob {filename}: {e}")
+                container_client.delete_blob(filename)
+                logger.info(f"Deleted obsolete blob: {filename}")
+            except ResourceNotFoundError:
+                pass # Already gone
 
-        # Upload files in latest log that aren't in container
-        files_to_upload = [name for name in latest_filenames if name not in existing_blobs]
-        for filename in files_to_upload:
-            file_path = os.path.join(source_directory, filename)
-            if os.path.isfile(file_path) and filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                try:
+        # Stream uploads to Azure (source -> memory -> Azure)
+        for filename in to_upload:
+            source_url = url_map[filename]
+            try:
+                # Stream the image into memory
+                response = requests.get(source_url, stream=True, timeout=15)
+                if response.status_code == 200:
                     blob_client = container_client.get_blob_client(filename)
-                    with open(file_path, "rb") as data:
-                        blob_client.upload_blob(data, overwrite=True)
-                    logger.debug(f"Uploaded: {filename}")
-                except (OSError, AzureError) as e:
-                    logger.warning(f"Failed to upload {filename}: {e}")
-            else:
-                logger.debug(f"Skipped non-image or missing file: {filename}")
+                    # upload_blob accepts the raw response stream
+                    blob_client.upload_blob(response.raw, overwrite=True)
+                    logger.success(f"Streamed and uploaded: {filename}")
+                else:
+                    logger.warning(f"Failed to fetch: {source_url} (HTTP {response.status_code})")
+            except (RequestException, AzureError) as e:
+                logger.error(f"Error streaming {filename}: {e}")
 
-        logger.success(f"Sync complete. {len(files_to_upload)} files uploaded, \
-                       {len(blobs_to_delete)} files deleted.")
-
+        # Update known state in MongoDB
+        db["metadata"].update_one(
+            {"_id": f"inventory_{img_type}"},
+            {"$set": {
+                "filenames": list(desired_filenames),
+                "updated_at": datetime.now()
+            }},
+            upsert=True
+        )
     except AzureError as e:
         logger.error(f"Critical error accessing container '{container_name}': {e}")
         sys.exit()
+
+
+RETRYABLE_ERRORS = (
+    PyMongoError,
+    gspread.exceptions.APIError,
+    ConnectionError,
+    TimeoutError,
+    AutoReconnect,
+    NetworkTimeout,
+    ExecutionTimeout,
+)
+
+def retry(max_attempts=3, backoff=1.5):
+    """Retry function decorator."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 1
+            retry_count = 0
+
+            while True:
+                try:
+                    result = func(*args, **kwargs)
+                    # attach retry count to the result if it's a dict
+                    if isinstance(result, dict):
+                        result["_retry_count"] = retry_count
+                    return result
+
+                except RETRYABLE_ERRORS as exc:
+                    if attempt >= max_attempts:
+                        raise
+
+                    retry_count += 1
+                    wait = backoff ** attempt
+
+                    logger.warning(
+                        f"Retryable error in {func.__name__}: {exc}. "
+                        f"Retrying in {wait:.1f}s (attempt {attempt}/{max_attempts})"
+                    )
+
+                    time.sleep(wait)
+                    attempt += 1
+
+        return wrapper
+    return decorator
