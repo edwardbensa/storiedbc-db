@@ -3,194 +3,7 @@
 # Imports
 from collections import defaultdict
 from loguru import logger
-from .embedders import GemmaEmbedder
-
-
-collection_label_map = {
-    "books": "Book",
-    "book_versions": "BookVersion",
-    "book_series": "BookSeries",
-    "genres": "Genre",
-    "awards": "Award",
-    "creators": "Creator",
-    "creator_roles": "CreatorRole",
-    "publishers": "Publisher",
-    "formats": "Format",
-    "languages": "Language",
-    "users": "User",
-    "clubs": "Club",
-    "user_badges": "UserBadge",
-    "club_badges": "ClubBadge",
-    "countries": "Country",
-}
-
-
-def process_books(books):
-    """Convert book award data to str and embed descriptions."""
-
-    # Generate list of dicts with book award data
-    book_awards = []
-
-    for book in books:
-        book_id = book.get("_id")
-        awards = book.get("awards", [])
-
-        for award in awards:
-            book_awards.append({
-                "book_id": book_id,
-                "award_id": award.get("_id"),
-                "award_name": award.get("name", ""),
-                "award_category": award.get("category", ""),
-                "award_year": award.get("year"),
-                "award_status": award.get("status", "")
-            })
-
-    # Convert book awards list to dict by concatenating list members
-    ba_map = {}
-    u_ids = set(i["book_id"] for i in book_awards)
-
-    for _id in u_ids:
-        awards_list = []
-        award_docs = [i for i in book_awards if i["book_id"] == _id]
-
-        for ad in award_docs:
-            award = ad["award_name"]
-            if ad["award_category"] != "":
-                award = f"{ad["award_name"]} for {ad["award_category"]}"
-            awards_list.append(f"{award}, {ad["award_year"]}, {ad["award_status"]}")
-
-        str_awards = "; ".join(str(i) for i in awards_list)
-        ba_map[_id] = str_awards
-
-    # Replace awards entries in books with new awards strings
-    for book in books:
-        book["awards"] = ba_map.get(book["_id"], None)
-        if book["awards"] is None:
-            book.pop("awards")
-
-    # Enrich and embed book descriptions
-    descriptions = []
-    valid_books = []
-    for book in books:
-        try:
-            combo = (
-                f"Title: {book["title"]}"
-                f"\n\nAuthor: {", ".join(str(k) for k in book["author"])}"
-                f"\n\nGenres: {", ".join(str(k) for k in book["genre"])}"
-                f"\n\nDescription: {book["description"]}"
-                )
-            descriptions.append(combo)
-            valid_books.append(book)
-        except KeyError:
-            logger.warning(f"Description not found for {book["title"]}")
-            continue
-
-    if descriptions:
-        model = GemmaEmbedder.instance()
-        embeddings = model.vectorise_many(descriptions)
-        for i, book in enumerate(valid_books):
-            book["description_embedding"] = embeddings[i]
-
-    return books, book_awards
-
-
-def proceess_ur(user_reads):
-    """
-    Aggregate user/version reading entries to obtain:
-    - most recent rstatus
-    - most recent start date
-    - most recent read date
-    - read count
-    - avg rating
-    - avg days to read
-    - avg read rate (pages_per_day or hours_per_day)
-    """
-    agg_ur = []
-    version_ids = set(i["version_id"] for i in user_reads)
-    user_ids = set(i["user_id"] for i in user_reads)
-    priority = {"Read": 3, "Reading": 2, "Paused": 1, "To Read": 0}
-
-    for u_id in user_ids:
-        for v_id in version_ids:
-
-            # All entries for this user + version
-            entries = [
-                e for e in user_reads
-                if e["user_id"] == u_id and e["version_id"] == v_id
-            ]
-            if not entries:
-                continue
-
-            # Flatten reading logs
-            logs = []
-            for e in entries:
-                if "reading_log" in e and e["reading_log"]:
-                    logs.extend(e["reading_log"])
-
-            if logs:
-                # Most recent rstatus
-                most_recent_event = max(logs, key=lambda x:
-                                        (x["timestamp"], priority.get(x["rstatus"], -1)))
-                most_recent_rstatus = most_recent_event["rstatus"]
-
-                # Most recent start ("Reading")
-                reading_events = [l for l in logs if l["rstatus"] == "Reading"]
-                most_recent_start = (
-                    max(reading_events, key=lambda x: x["timestamp"])["timestamp"]
-                    if reading_events else None
-                )
-
-                # Most recent read ("Read")
-                read_events = [l for l in logs if l["rstatus"] == "Read"]
-                most_recent_read = (
-                    max(read_events, key=lambda x: x["timestamp"])["timestamp"]
-                    if read_events else None
-                )
-
-                read_count = len(read_events)
-
-            else:
-                # no logs likely means "To Read"
-                most_recent_rstatus = "To Read"
-                most_recent_start = None
-                most_recent_read = None
-                read_count = 0
-
-            # Most recent review
-            try:
-                most_recent_review = [i["notes"] for i in entries][0]
-            except KeyError:
-                most_recent_review = None
-
-            # Averages
-            ratings = [e.get("rating") for e in entries if e.get("rating") is not None]
-            avg_rating = sum(ratings) / len(ratings) if ratings else None
-
-            d2r = [e.get("days_to_read") for e in entries if e.get("days_to_read")]
-            avg_days_to_read = sum(d2r) / len(d2r) if d2r else None
-
-            rates = []
-            for e in entries:
-                if "pages_per_day" in e and e["pages_per_day"]:
-                    rates.append(e["pages_per_day"])
-                elif "hours_per_day" in e and e["hours_per_day"]:
-                    rates.append(e["hours_per_day"])
-            avg_read_rate = sum(rates) / len(rates) if rates else None
-
-            agg_ur.append({
-                "user_id": u_id,
-                "version_id": v_id,
-                "most_recent_rstatus": most_recent_rstatus,
-                "most_recent_start": most_recent_start,
-                "most_recent_read": most_recent_read,
-                "most_recent_review": most_recent_review,
-                "read_count": read_count,
-                "avg_rating": avg_rating,
-                "avg_days_to_read": avg_days_to_read,
-                "avg_read_rate": avg_read_rate,
-            })
-
-    return agg_ur
+from .transform_for_aura import collection_label_map
 
 
 def sync_deletions(driver, db, since):
@@ -379,9 +192,6 @@ def user_reads_relationships(tx, user_reads):
     Create relationships between users and the books they read,
     using aggregated stats with pre-cleanup to handle status transitions
     """
-    agg_ur = proceess_ur(user_reads)
-    if not agg_ur:
-        return
 
     rel_map = {
         "DNF": "DID_NOT_FINISH", "Read": "HAS_READ", "Paused": "HAS_PAUSED",
@@ -389,7 +199,7 @@ def user_reads_relationships(tx, user_reads):
     }
 
     rows = []
-    for doc in agg_ur:
+    for doc in user_reads:
         rel_type = rel_map.get(doc.get("most_recent_rstatus"))
         if not rel_type:
             continue

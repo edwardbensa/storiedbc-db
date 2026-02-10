@@ -22,27 +22,55 @@ from src.config import (gsheet_cred, mongodb_uri, azure_str,
                         neo4j_uri, neo4j_user, neo4j_pwd)
 
 
+class MongoDBConnection:
+    """Singleton MongoDB connection manager."""
+    _instances = {}  # {db_name: client}
+
+    @classmethod
+    def get_client(cls, db_name="main"):
+        """Get or create MongoDB client for the specified database."""
+        if db_name not in ["main", "staging", "etl_metadata"]:
+            raise ValueError(f"Invalid db_name: {db_name}")
+
+        if db_name not in cls._instances:
+            try:
+                client = MongoClient(mongodb_uri)
+                client.admin.command('ping')
+                cls._instances[db_name] = client
+                logger.info(f"Created MongoDB connection: {db_name}")
+            except (ConnectionFailure, ConfigurationError) as e:
+                logger.error(f"Failed to connect to MongoDB: {e}")
+                sys.exit(1)
+
+        return cls._instances[db_name]
+
+    @classmethod
+    def get_database(cls, db_name="main"):
+        """Get database object."""
+        client = cls.get_client(db_name)
+        return client[db_name]
+
+    @classmethod
+    def close_all(cls):
+        """Close all open connections."""
+        for db_name, client in cls._instances.items():
+            try:
+                client.close()
+                logger.info(f"Closed MongoDB connection: {db_name}")
+            except Exception as e: # pylint: disable=W0718
+                logger.error(f"Error closing {db_name}: {e}")
+        cls._instances.clear()
+
+
 def connect_mongodb(db_name="main"):
-    """
-    Connects to MongoDB and returns specified database object.
-    """
-    if db_name not in ["main", "staging", "etl_metadata"]:
-        raise ValueError("The database name must be 'main', 'staging', or 'etl_metadata'.")
-    try:
-        client = MongoClient(mongodb_uri)
-        db = client[db_name]
-        client.admin.command('ping')
-        logger.info(f"Successfully connected to MongoDB: {db_name} database.")
-        return db
-    except (ConnectionFailure, ConfigurationError)  as e:
-        logger.error(f"Failed to connect to MongoDB: {e}.")
-        sys.exit()
+    """Connects to MongoDB and returns specified database object."""
+    return MongoDBConnection.get_database(db_name)
+
 
 def close_mongodb():
-    """Close MongoDB client."""
-    client = MongoClient(mongodb_uri)
-    client.close()
-    logger.info("MongoDB connection closed.")
+    """Close all MongoDB connections."""
+    MongoDBConnection.close_all()
+
 
 def connect_auradb():
     """

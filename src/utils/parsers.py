@@ -177,105 +177,6 @@ def add_hashes(documents, id_fields):
     return mod_docs, id_hashes, full_hashes
 
 
-def update_records(old_documents, new_documents):
-    """
-    Match by id_hash, detect changes by hash, preserve ObjectIds.
-    Returns updated docs and structured diff.
-    """
-    # Index by identity
-    new_lookup = {doc["id_hash"]: doc for doc in new_documents}
-
-    updated_docs = []
-    diff = {"updated": [], "unchanged": []}
-
-    for old_doc in old_documents:
-        id_hash = old_doc["id_hash"]
-        new_doc = new_lookup.get(id_hash)
-
-        if not new_doc:
-            diff["unchanged"].append(old_doc)
-            updated_docs.append(old_doc)
-            continue
-
-        # Check if content changed
-        if old_doc["full_hash"] == new_doc["full_hash"]:
-            # No changes
-            diff["unchanged"].append(old_doc)
-            updated_docs.append(old_doc)
-            continue
-
-        # Content changed - track what changed
-        changes = {}
-        for key, new_value in new_doc.items():
-            if key in ("_id", "full_hash", "id_hash"):
-                continue
-            old_value = old_doc.get(key)
-            if old_value != new_value:
-                changes[key] = {"from": old_value, "to": new_value}
-
-        # Create updated doc preserving ObjectId
-        updated_doc = {"_id": old_doc["_id"], **new_doc}
-        updated_docs.append(updated_doc)
-
-        diff["updated"].append({
-            "_id": old_doc["_id"],
-            "id_hash": id_hash,
-            "before": {k: v["from"] for k, v in changes.items()},
-            "after": {k: v["to"] for k, v in changes.items()},
-            "changes": changes
-        })
-
-    return updated_docs, diff
-
-
-def process_records(old_documents, new_documents):
-    """
-    Match by id_hash, detect changes by full_hash.
-    Find removed, unchanged, and updated records (preserve ObjectIds).
-    Returns only docs that changed + structured diff.
-    """
-    # Index by id_hash
-    new_lookup = {doc["id_hash"]: doc for doc in new_documents}
-
-    to_upsert = []
-    diff = {"updated": [], "unchanged": [], "deleted": []}
-
-    for old_doc in old_documents:
-        id_hash = old_doc["id_hash"]
-        new_doc = new_lookup.get(id_hash)
-
-        # Deletions (record in db but not in sheet)
-        if not new_doc:
-            diff["deleted"].append(old_doc)
-            continue
-
-        # Unchanged (full hashes match)
-        if old_doc["full_hash"] == new_doc["full_hash"]:
-            diff["unchanged"].append(old_doc)
-            continue # Skip - do not add to to_upsert
-
-        # Changes (full hashes differ)
-        changes = {}
-        for key, new_value in new_doc.items():
-            if key in ("_id", "full_hash", "id_hash", "updated_at"):
-                continue
-            old_value = old_doc.get(key)
-            if old_value != new_value:
-                changes[key] = {"from": old_value, "to": new_value}
-
-        # Merge changes into the document, preserving original _id
-        updated_doc = {"_id": old_doc["_id"], **new_doc, }
-        to_upsert.append(updated_doc)
-
-        diff["updated"].append({
-            "_id": old_doc["_id"],
-            "id_hash": id_hash,
-            "changes": changes
-        })
-
-    return to_upsert, diff
-
-
 def find_deltas(old_documents, new_documents):
     """
     Categorizes records into New, Updated, Deleted, and Unchanged.
@@ -411,26 +312,6 @@ def convert_document(doc):
             return dt
     return doc
 
-
-def clean_docs(documents):
-    """Remove hashes and ensure _id is ObjectId."""
-    cleaned = []
-    for doc in documents:
-        doc = dict(doc)
-
-        # Remove hashes
-        for key in ("full_hash", "id_hash"):
-            doc.pop(key, None)
-
-        if "_id" in doc:
-            # Set _id to ObjectId
-            doc["_id"] = ObjectId(doc["_id"])
-        else:
-            # Add ObjectId
-            doc = {"_id": ObjectId(), **doc}
-
-        cleaned.append(doc)
-    return cleaned
 
 def id_docs(documents):
     """Ensure _id is ObjectId."""

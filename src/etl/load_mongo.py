@@ -12,7 +12,7 @@ from loguru import logger
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError, PyMongoError
 from src.utils.connectors import connect_mongodb, close_mongodb, retry
-from src.utils.mongo_ops import update_sync_state
+from src.utils.ops_mongo import update_sync_state
 from src.utils.parsers import convert_document
 from src.config import MAIN_COLL_DIR
 

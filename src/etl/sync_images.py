@@ -16,7 +16,7 @@ blob_service_client = connect_azure_blob()
 
 def run_image_sync(collection, url_field, img_type, container_name):
     """Sync images."""
-    # Load your processed data
+    # Load processed data
     with open(STAGING_COLL_DIR / f"{collection}.json", "r", encoding="utf-8") as f:
         versions = json.load(f)
 

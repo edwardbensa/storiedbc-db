@@ -7,8 +7,8 @@ from pathlib import Path
 from loguru import logger
 from pymongo.errors import PyMongoError
 from src.utils.connectors import connect_mongodb, close_mongodb, connect_auradb, retry
-from src.utils.mongo_ops import update_sync_state
-from src.utils.polyglot import (
+from src.utils.ops_mongo import update_sync_state
+from src.utils.ops_aura import (
     upsert_nodes, ensure_constraints, create_relationships, user_reads_relationships,
     badges_relationships, book_awards_relationships, club_book_relationships,
     cleanup_nodes, sync_deletions,

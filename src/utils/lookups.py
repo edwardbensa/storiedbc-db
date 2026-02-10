@@ -1,24 +1,26 @@
 """Lookup utlity functions"""
 
 # Imports
+import json
 from loguru import logger
+from src.config import STAGING_COLL_DIR
 from .parsers import to_int
 
 
 # Load lookup collections
-def load_lookup_data(db, lookup_registry: dict) -> dict:
+def load_lookup_maps(db, lookup_registry: dict) -> dict:
     """
     Builds lookup maps by fetching directly from MongoDB.
     """
-    lookup_data = {}
+    lookup_maps = {}
 
     for name, config in lookup_registry.items():
-        # Access the collection in the staging database
+        # Access collection in database
         collection = db[name]
         string_field = config["field"]
         get_fields = config["get"]
 
-        # Build projection for efficiency
+        # Build projection
         projection = {string_field: 1}
         if isinstance(get_fields, str):
             projection[get_fields] = 1
@@ -26,26 +28,34 @@ def load_lookup_data(db, lookup_registry: dict) -> dict:
             for f in get_fields:
                 projection[f] = 1
 
-        # Fetch the full lookup set from MongoDB
+        # Fetch full lookup set from MongoDB
         cursor = collection.find({}, projection)
 
+        # Cold start fallback: If DB is empty, check local JSON delta
+        if not cursor:
+            file_path = STAGING_COLL_DIR / f"{name}.json"
+            if file_path.exists():
+                logger.info(f"Cold Start: Bootstrapping '{name}' lookup from local delta.")
+                with open(file_path, "r", encoding="utf-8") as f:
+                    cursor = json.load(f)
+
         if isinstance(get_fields, str):
-            lookup_data[name] = {
+            lookup_maps[name] = {
                 doc[string_field]: doc.get(get_fields)
                 for doc in cursor if string_field in doc
             }
         else:
-            lookup_data[name] = {
+            lookup_maps[name] = {
                 doc[string_field]: {field: doc.get(field) for field in get_fields}
                 for doc in cursor if string_field in doc
             }
 
-        logger.debug(f"Loaded {len(lookup_data[name])} entries into '{name}' lookup map.")
+        logger.info(f"Loaded {len(lookup_maps[name])} entries into '{name}' lookup map.")
 
-    return lookup_data
+    return lookup_maps
 
 
-def resolve_lookup(collection_name, input_string, lookup_data):
+def resolve_lookup(collection_name, input_string, lookup_maps):
     """
     Uses a lookup registry to return specified fields.
 
@@ -59,16 +69,16 @@ def resolve_lookup(collection_name, input_string, lookup_data):
         If 'get' is a list, returns a dictionary of values.
         Returns None if no match is found or configuration is incomplete.
     """
-    return lookup_data.get(collection_name, {}).get(input_string)
+    return lookup_maps.get(collection_name, {}).get(input_string)
 
 
-def resolve_creator(creator_id: str, lookup_data) -> dict:
+def resolve_creator(creator_id: str, lookup_maps) -> dict:
     """
     Resolves a creator by custom creator_id and returns:
     - _id: MongoDB ObjectId
     - {creator_role}_name: Full name (firstname + lastname)
     """
-    doc = lookup_data["creators"].get(creator_id)
+    doc = lookup_maps["creators"].get(creator_id)
     if not doc:
         logger.warning(f"No creator found for ID '{creator_id}'")
         return {}
@@ -79,7 +89,7 @@ def resolve_creator(creator_id: str, lookup_data) -> dict:
     }
 
 
-def resolve_awards(match, lookup_data: dict) -> dict:
+def resolve_awards(match, lookup_maps: dict) -> dict:
     """
     Resolves award subdocument from regex match groups.
     Omits award_category if category ID is ''.
@@ -87,14 +97,14 @@ def resolve_awards(match, lookup_data: dict) -> dict:
 
     if  match.group(3) == '':
         subdoc = {
-            "_id": resolve_lookup('awards', match.group(1), lookup_data),
+            "_id": resolve_lookup('awards', match.group(1), lookup_maps),
             "name": match.group(2),
             "year": to_int(match.group(4)),
             "status": match.group(5)
         }
     else:
         subdoc = {
-                "_id": resolve_lookup('awards', match.group(1), lookup_data),
+                "_id": resolve_lookup('awards', match.group(1), lookup_maps),
                 "name": match.group(2),
                 "category": match.group(3),
                 "year": to_int(match.group(4)),

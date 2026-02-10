@@ -2,12 +2,13 @@
 
 # Imports
 import os
+import sys
 import shutil
 import hashlib
 from loguru import logger
 
 
-def wipe_directory(directory):
+def wipe_directory(directory, terminate: bool=True):
     """
     Deletes all files from specified directory.
     """
@@ -23,7 +24,8 @@ def wipe_directory(directory):
             logger.info("Directory is empty. No deletion needed.")
     except OSError as e:
         logger.error(f"Error deleting files from '{directory}': {e}")
-        exit()
+        if terminate:
+            sys.exit()
 
 
 def generate_image_filename(doc: dict, img_type: str):
@@ -46,15 +48,16 @@ def generate_image_filename(doc: dict, img_type: str):
                 return f"{prefix}-{hash_digest}"
 
         raise ValueError("No valid unique identifier found in book metadata.")
-    elif img_type in ["user", "club"]:
+
+    if img_type in ["user", "club"]:
         field = doc.get(f"{img_type}_handle")
         if field and isinstance(field, str) and field.strip():
             hash_digest = hashlib.sha256(field.encode()).hexdigest()[:hash_length]
-            return f"{hash_digest}.jpg"
+            return hash_digest
     else:
         field = doc.get("profile_photo")
         if field and isinstance(field, str) and field.strip():
             hash_digest = hashlib.sha256(field.encode()).hexdigest()[:hash_length]
-            return f"{hash_digest}.jpg"
+            return hash_digest
 
         raise ValueError("Missing or invalid handle for profile photo.")

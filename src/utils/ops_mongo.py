@@ -127,6 +127,8 @@ def download_collections(db, output_dir, excluded_collections: list, since: date
     Downloads all collections (except excluded) since specified timestamp as JSON.
     Returns the count of collections that actually had new data.
     """
+    os.makedirs(output_dir, exist_ok=True)
+
     collections = db.list_collection_names()
     files_created = 0
 

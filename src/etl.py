@@ -19,33 +19,29 @@ def run_script(script_path):
         logger.error(f"Execution error: {e}")
         return 1 # Generic error
 
+
 def main():
-    """Main function to run the ELT pipeline in sequence."""
-    scripts = [
-        "src/etl/extract_gsheet.py",
-        "src/etl/transform_bronze.py", # Gatekeeper
-        "src/etl/load_mongo.py",
-        "src/etl/sync_images.py",
-        "src/etl/transform_silver.py",
-        "src/etl/load_aura.py"
-    ]
+    """Main function to run the ELT pipeline in phases."""
+    # Phase 1: Extraction
+    run_script("src/etl/extract_gsheet.py")
 
-    for script in scripts:
-        exit_code = run_script(script)
+    # Phase 2: Staging to Main
+    staging2main_status = run_script("src/etl/transform_staging2main.py") 
 
-        if exit_code == 0:
-            continue # Normal success, keep going
+    if staging2main_status == 0:
+        run_script("src/etl/load_mongo.py")
+        run_script("src/etl/sync_images.py")
+    elif staging2main_status == 10:
+        logger.info("No staging updates. Skipping main DB load and image sync phase.")
 
-        if exit_code == 10:
-            logger.success("Pipeline stopped gracefully: No new data to process.")
-            sys.exit(0) # Exit the whole ETL with success
+    # Phase 3: Main to Aura
+    main2aura_status = run_script("src/etl/transform_main2aura.py")
 
-        # Any other code is a failure
-        logger.critical(f"Pipeline aborted: {script} failed with code {exit_code}")
-        sys.exit(1)
-
-    logger.success("ETL Pipeline completed successfully!")
+    if main2aura_status == 0:
+        run_script("src/etl/load_aura.py")
+    elif main2aura_status == 10:
+        logger.success("AuraDB is already in sync with Main. Pipeline complete.")
 
 if __name__ == "__main__":
-    wipe_directory(DATA_DIR)
+    wipe_directory(DATA_DIR, terminate=False)
     main()

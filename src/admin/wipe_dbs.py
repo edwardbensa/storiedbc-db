@@ -3,8 +3,8 @@
 # Imports
 from loguru import logger
 from src.utils.connectors import connect_mongodb, connect_auradb
-from src.utils.polyglot import clear_all_nodes
-from src.utils.mongo_ops import drop_all_collections
+from src.utils.ops_aura import clear_all_nodes
+from src.utils.ops_mongo import drop_all_collections
 
 
 # Connect to databases

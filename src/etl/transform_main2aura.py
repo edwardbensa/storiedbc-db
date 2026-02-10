@@ -1,5 +1,7 @@
 """Fetch, transform and store relevant MongoDB data for AuraDB upsertion."""
 
+# Imports
+import sys
 import json
 import time
 import datetime
@@ -9,14 +11,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
 from pymongo.errors import PyMongoError
 from src.utils.parsers import safe_value
-from src.utils.security import decrypt_field
-from src.utils.mongo_ops import load_sync_state, fetch_documents
+from src.utils.ops_mongo import load_sync_state, fetch_documents
 from src.utils.connectors import connect_mongodb, close_mongodb, retry
-from src.utils.polyglot import process_books, proceess_ur
+from src.utils.transform_for_aura import build_extraction_config, transform_collections
 from src.config import AURA_COLL_DIR
 
 
-class Extract4AuraPipeline:
+class AuraTransformPipeline:
     """Pipeline for extracting and transforming MongoDB data for AuraDB."""
 
     SYNC_KEY = "auradb_sync"
@@ -74,7 +75,7 @@ class Extract4AuraPipeline:
 
     # Core helpers
     @retry(max_attempts=3, backoff=2)
-    def _fetch_collection(self, name, collection, **kwargs):
+    def fetch_collection(self, name, collection, **kwargs):
         """Fetch a single collection with retry."""
         start = time.time()
         try:
@@ -103,142 +104,8 @@ class Extract4AuraPipeline:
         start = time.time()
         lst = self.last_sync_time
 
-        # Field maps
-        books_map = {
-            "author": "author.name",
-            "author_id": "author._id",
-            "series": "series.name",
-            "series_id": "series._id",
-        }
-
-        bv_map = {
-            "translator": "translator.name",
-            "translator_id": "translator._id",
-            "illustrator": "illustrator.name",
-            "illustrator_id": "illustrator._id",
-            "narrator": "narrator.name",
-            "narrator_id": "narrator._id",
-            "cover_artist": "cover_artist.name",
-            "cover_artist_id": "cover_artist._id",
-            "contributor": "contributor.name",
-            "contributor_id": "contributor._id",
-            "publisher_id": "publisher._id",
-            "publisher": "publisher.name",
-        }
-
-        user_map = {
-            "club_ids": "clubs._id",
-            "badges": "badges.name",
-            "badge_timestamps": "badges.timestamp",
-        }
-
-        club_map = {
-            "badges": "badges.name",
-            "badge_timestamps": "badges.timestamp",
-        }
-
-        excluded_user_fields = [
-            "firstname",
-            "lastname",
-            "email_address",
-            "password",
-            "dob",
-            "gender",
-            "city",
-            "state",
-            "is_admin",
-            "last_active_date",
-        ]
-        excluded_club_fields = ["member_permissions", "join_requests", "moderators"]
-
-        # Collection configs
-        tasks = {
-            "books": {
-                "collection": self.db["books"],
-                "field_map": books_map,
-                "since": lst,
-            },
-            "book_versions": {
-                "collection": self.db["book_versions"],
-                "field_map": bv_map,
-                "since": lst,
-            },
-            "book_series": {
-                "collection": self.db["book_series"],
-                "exclude_fields": ["books"],
-                "since": lst,
-            },
-            "genres": {
-                "collection": self.db["genres"],
-                "exclude_fields": ["date_added"],
-                "since": lst,
-            },
-            "awards": {
-                "collection": self.db["awards"],
-                "exclude_fields": ["date_added"],
-                "since": lst,
-            },
-            "creators": {
-                "collection": self.db["creators"],
-                "exclude_fields": ["date_added"],
-                "since": lst,
-            },
-            "creator_roles": {
-                "collection": self.db["creator_roles"],
-                "since": lst,
-            },
-            "publishers": {
-                "collection": self.db["publishers"],
-                "exclude_fields": ["date_added"],
-                "since": lst,
-            },
-            "formats": {
-                "collection": self.db["formats"],
-                "since": lst,
-            },
-            "languages": {
-                "collection": self.db["languages"],
-                "since": lst,
-            },
-            "user_badges": {
-                "collection": self.db["user_badges"],
-                "exclude_fields": ["date_added", "tiers"],
-                "since": lst,
-            },
-            "club_badges": {
-                "collection": self.db["club_badges"],
-                "exclude_fields": ["date_added", "tiers"],
-                "since": lst,
-            },
-            "countries": {
-                "collection": self.db["countries"],
-                "since": lst,
-            },
-            "users": {
-                "collection": self.db["users"],
-                "exclude_fields": excluded_user_fields,
-                "field_map": user_map,
-                "since": lst,
-            },
-            "clubs": {
-                "collection": self.db["clubs"],
-                "exclude_fields": excluded_club_fields,
-                "field_map": club_map,
-                "since": lst,
-            },
-            "user_reads": {
-                "collection": self.db["user_reads"],
-                "since": lst,
-            },
-            "club_period_books": {
-                "collection": self.db["club_period_books"],
-                "since": lst,
-            },
-            "club_reading_periods": {
-                "collection": self.db["club_reading_periods"],
-                "since": lst,
-            }
-        }
+        # Extraction configs
+        tasks = build_extraction_config(db=self.db, lst=lst)
 
         results = {}
 
@@ -247,7 +114,7 @@ class Extract4AuraPipeline:
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
                 futures = {
                     executor.submit(
-                        self._fetch_collection,
+                        self.fetch_collection,
                         name,
                         cfg["collection"],
                         exclude_fields=cfg.get("exclude_fields"),
@@ -263,7 +130,7 @@ class Extract4AuraPipeline:
         else:
             # Sequential fallback
             for name, cfg in tasks.items():
-                _, records = self._fetch_collection(
+                _, records = self.fetch_collection(
                     name,
                     cfg["collection"],
                     exclude_fields=cfg.get("exclude_fields"),
@@ -272,45 +139,13 @@ class Extract4AuraPipeline:
                 )
                 results[name] = records
 
-        # Enrich users
-        current_year = datetime.date.today().year
-        users = results.get("users", [])
-        for user in users:
-            goals = user.get("reading_goal", [])
-            user["reading_goal"] = next(
-                (g["goal"] for g in goals if g.get("year") == current_year),
-                "N/A",
-            )
-            country = decrypt_field(user["country"], user["key_version"])
-            user["country"] = country
-            user.pop("key_version", None)
+        # Early stopping signal
+        if not any(results.values()):
+            logger.info("No new data found in main. Signalling early pipeline stop.")
+            sys.exit(10)
 
-        # Enrich creators
-        creators = results.get("creators", [])
-        for creator in creators:
-            firstname = creator.get("firstname", "")
-            lastname = creator.get("lastname")
-            creator["name"] = (
-                f"{firstname} {lastname}".strip() if lastname else firstname
-            )
-
-        # Process books into books + book_awards
-        books = results.get("books", [])
-        books, book_awards = process_books(books)
-        results["books"] = books
-        results["book_awards"] = book_awards
-
-        # Process user reads
-        user_reads = results.get("user_reads", [])
-        user_reads = proceess_ur(user_reads)
-        results["user_reads"] = user_reads
-
-        # Enrich club period books
-        cpb = results.get("club_period_books", [])
-        crp = results.get("club_reading_periods", [])
-        for i in cpb:
-            i["period_name"] = [k["name"] for k in crp if k["_id"] == i["period_id"]][0]
-        results["club_period_books"] = cpb
+        # Process and enrich results
+        results = transform_collections(results)
 
         duration = int((time.time() - start) * 1000)
         stats = {
@@ -318,7 +153,7 @@ class Extract4AuraPipeline:
             "updated": 0,
             "removed": 0,
             "duration_ms": duration,
-            "retry_count": 0,  # aggregate retry_count if you want later
+            "retry_count": 0,
         }
         self.log_event(
             "extract",
@@ -327,6 +162,7 @@ class Extract4AuraPipeline:
         )
 
         return results
+
 
     def save_files(self, data):
         """Save extracted datasets to JSON files."""
@@ -383,7 +219,7 @@ class Extract4AuraPipeline:
             "batch_id": self.batch_id,
             "total_files": len(data),
             "total_records": total_records,
-            "total_retries": 0,  # can be extended to aggregate from _retry_count
+            "total_retries": 0,
             "duration_ms": duration_ms,
         }
 
@@ -398,7 +234,7 @@ class Extract4AuraPipeline:
 
 # Run
 if __name__ == "__main__":
-    pipeline = Extract4AuraPipeline(workers=8)
+    pipeline = AuraTransformPipeline(workers=8)
     try:
         pipeline.sync_all()
     finally:

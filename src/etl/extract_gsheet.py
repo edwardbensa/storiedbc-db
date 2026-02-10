@@ -10,7 +10,7 @@ from loguru import logger
 from pymongo.errors import PyMongoError
 from src.utils.parsers import add_hashes, find_deltas, id_docs
 from src.utils.connectors import connect_gsheet, connect_mongodb, retry
-from src.utils.mongo_ops import fetch_documents, upsert_documents, archive_delete
+from src.utils.ops_mongo import fetch_documents, upsert_documents, archive_delete
 
 
 # Class-based pipeline

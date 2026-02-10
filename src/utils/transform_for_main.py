@@ -1,46 +1,184 @@
-"""Transform new staging data for upload to main database."""
+"""Staging DB -> main DB data transformation utility functions."""
 
 # Imports
 import os
 import re
-import sys
-from datetime import datetime
+import json
 from pathlib import Path
+from datetime import datetime
 from loguru import logger
 from src.config import STAGING_COLL_DIR, MAIN_COLL_DIR
-from src.utils.lookups import load_lookup_data, resolve_lookup, resolve_creator, resolve_awards
-from src.utils.mongo_ops import download_collections, load_sync_state, fetch_documents
-from src.utils.connectors import connect_azure_blob, connect_mongodb, close_mongodb
-from src.utils.security import encrypt_pii, hash_password, latest_key_version
-from src.utils.parsers import to_int, to_float, to_array, make_subdocuments
-from src.utils.transforms import (transform_collection, add_read_details,
-                                  set_custom_ids, remove_custom_ids)
-from src.utils.fields import generate_image_url
+from .security import encrypt_pii, hash_password, latest_key_version
+from .lookups import resolve_lookup, resolve_creator, resolve_awards, load_lookup_maps
+from .fields import generate_image_url, generate_rlog, compute_d2r, compute_rr, find_doc
+from .parsers import to_int, to_float, to_array, make_subdocuments, clean_document, safe_value
 
 
-# pylint: disable=W0621
 # pylint: disable=W0613
 
-# Transform functions
+# GENERAL FUNCTIONS
+
+def transform_collection(collection_name: str, transform_func, *, context):
+    """
+    Loads a raw JSON collection, transforms each document,
+    and writes the result to MAIN_COLL_DIR.
+    Assumes _id is already present in the input.
+    """
+    input_path = os.path.join(STAGING_COLL_DIR, f"{collection_name}.json")
+    output_path = os.path.join(MAIN_COLL_DIR, f"{collection_name}.json")
+
+    try:
+        with open(input_path, encoding="utf-8") as f:
+            raw_docs = json.load(f)
+
+        transformed = []
+        removed_keys = []
+        for doc in raw_docs:
+            clean_doc, removed = clean_document(transform_func(doc, context=context))
+            clean_doc = safe_value(clean_doc)
+            transformed.append(clean_doc)
+            removed_keys.extend(removed)
+
+        counts = {item: removed_keys.count(item) for item in sorted(set(removed_keys))}
+        if counts != {}:
+            logger.warning(f"The following keys were removed: {counts}")
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(transformed, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"Transformed {len(transformed)} records -> {output_path}")
+
+    except FileNotFoundError:
+        logger.warning(f"Raw JSON file not found: {input_path}")
+    except (KeyError, TypeError, ValueError) as e:
+        logger.error(f"Error transforming '{collection_name}': {e}")
+
+
+def remove_custom_ids(collections_to_cleanup: dict, source_directory):
+    """
+    Removes specified custom ID fields from each collection in the source directory,
+    and writes the cleaned output to MAIN_COLL_DIR.
+    """
+    source_directory = Path(source_directory)
+    output_directory = Path(MAIN_COLL_DIR)
+
+    for collection_name, id_field in collections_to_cleanup.items():
+        input_path = source_directory / f"{collection_name}.json"
+        output_path = output_directory / f"{collection_name}.json"
+
+        try:
+            with input_path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            logger.info(f"Loaded {len(data)} documents from '{input_path.name}'")
+
+            cleaned = []
+            for doc in data:
+                doc.pop(id_field, None)
+                doc, _ = clean_document(doc, remove_ts=True)
+                cleaned.append(doc)
+
+            with output_path.open("w", encoding="utf-8") as f:
+                json.dump(cleaned, f, ensure_ascii=False, indent=2)
+
+            logger.success(f"Removed '{id_field}' from all documents in '{collection_name}.json'")
+
+        except FileNotFoundError:
+            logger.warning(f"File not found: {input_path}")
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.error(f"Failed to process '{input_path.name}': {e}")
+
+
+def set_custom_ids(collections: dict):
+    """
+    Replaces the _id field in each document with the value from the specified custom ID field.
+    Reads from source_directory and writes to MAIN_COLL_DIR.
+    """
+    transformed_dir = Path(MAIN_COLL_DIR)
+    raw_dir = Path(STAGING_COLL_DIR)
+
+    for collection_name, custom_id_field in collections.items():
+        transformed_path = transformed_dir / f"{collection_name}.json"
+        raw_path = raw_dir / f"{collection_name}.json"
+
+        if transformed_path.exists():
+            input_path = transformed_path
+        else:
+            logger.info(f"Transforming raw file: {raw_path}...")
+            input_path = raw_path
+
+        output_path = transformed_path
+
+        try:
+            with input_path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            logger.info(f"Loaded {len(data)} documents from '{input_path.name}'")
+
+            updated = []
+            for doc in data:
+                doc, _ = clean_document(doc, remove_ts=True)
+                if custom_id_field in doc:
+                    doc["_id"] = str(doc[custom_id_field])
+                    doc.pop(custom_id_field, None)
+                updated.append(doc)
+
+            with output_path.open("w", encoding="utf-8") as f:
+                json.dump(updated, f, ensure_ascii=False, indent=2)
+
+            logger.success(f"Set _id to '{custom_id_field}' in all '{collection_name}' documents.")
+
+        except FileNotFoundError:
+            logger.warning(f"File not found: {input_path}")
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.error(f"Failed to process '{input_path.name}': {e}")
+
+
+def add_read_details(doc, book_versions):
+    """Add reading log, days to read, and read rates."""
+
+    # Skip if current_rstatus is "To Read"
+    current_rstatus = doc["rstatus_id"]
+    if current_rstatus == "rs4":
+        doc["reading_log"] = ""
+        doc.pop("rstatus_history")
+        return doc
+
+    version_id = doc.get("version_id")
+    version_doc = find_doc(book_versions, "version_id", version_id)
+
+    # Add reading log and days to read
+    doc["reading_log"] = generate_rlog(doc)
+    doc["days_to_read"] = compute_d2r(doc)
+
+    # Add read rate
+    metric = "hours" if version_doc["format"] == "audiobook" else "pages"
+    doc[f"{metric}_per_day"] = compute_rr(doc, book_versions)
+
+    doc.pop("rstatus_history")
+    return doc
+
+
+
+# COLLECTION SPECIFIC FUNCTIONS
+
 def transform_books(doc, *, context):
     """
     Transforms a books document to the desired structure.
     """
-    lookup_data = context["lookup_data"]
-    subdoc_registry = context["subdoc_registry"]
+    lookups = context["lookup_data"]
+    subdoc_reg = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
         "book_id": doc.get("book_id"),
         "title": doc.get("title"),
-        "author": make_subdocuments(doc.get("author"), "creators", subdoc_registry, separator=','),
+        "author": make_subdocuments(doc.get("author"), "creators", subdoc_reg, separator=','),
         "genre": to_array(doc.get("genre")),
-        "series": resolve_lookup('book_series', doc.get("series"), lookup_data),
+        "series": resolve_lookup('book_series', doc.get("series"), lookups),
         "series_index": to_int(doc.get("series_index")),
         "description": doc.get("description"),
         "first_publication_date": doc.get("first_publication_date"),
-        "contributors": make_subdocuments(doc.get("contributors"), "creators", subdoc_registry,','),
-        "awards": make_subdocuments(doc.get("awards"), "awards", subdoc_registry, separator='|'),
+        "contributors": make_subdocuments(doc.get("contributors"), "creators", subdoc_reg,','),
+        "awards": make_subdocuments(doc.get("awards"), "awards", subdoc_reg, separator='|'),
         "tags": to_array(doc.get("tags")),
         "date_added": doc.get("date_added")
     }
@@ -364,81 +502,17 @@ def transform_awards(doc, *, context):
         "year_ended": to_int(doc.get("year_ended"))
     }
 
-raw_collections_to_cleanup = {
-    "genres": "genre_id",
-    "publishers": "publisher_id",
-    "tags": "tag_id",
-}
 
-# Collections to modify id_fields to use custom string _ids
-collections_to_modify = {
-    "formats": "format_id",
-    "languages": "language_id",
-    "creator_roles": "cr_id",
-    "read_statuses": "rstatus_id",
-    "club_event_types": "event_type_id",
-    "club_event_statuses": "event_status_id",
-    "user_permissions": "permission_id",
-    "countries": "country_id"
-}
+# LOOKUP DATA AND SUBDOCUMENT REGISTRY
 
-transform_map = {
-    "club_members": transform_club_members,
-    "club_member_reads": transform_club_member_reads,
-    "club_period_books": transform_club_period_books,
-    "club_discussions": transform_club_discussions,
-    "club_events": transform_club_events,
-    "club_reading_periods": transform_club_reading_periods,
-    "club_badges": transform_club_badges,
-    "clubs": transform_clubs,
-    "user_reads": transform_user_reads,
-    "user_roles": transform_user_roles,
-    "user_badges": transform_user_badges,
-    "users": transform_users,
-    "books": transform_books,
-    "book_versions": transform_book_versions,
-    "book_series": transform_book_series,
-    "creators": transform_creators,
-    "awards": transform_awards,
-}
+def build_registries(db):
+    """
+    Returns lookup data for _id reference
+    and subdocument registry for parsing flat fields.
+    """
 
-if __name__ == "__main__":
-    # Connect to db
-    staging_db = connect_mongodb("staging")
-    etl_db = connect_mongodb("etl_metadata")
-
-    # Load sync state
-    lst = load_sync_state(etl_db, "main_sync")
-
-    # Download deltas and capture count
-    logger.info("Fetching collections...")
-    DELTA_COUNT = download_collections(staging_db, STAGING_COLL_DIR, ["deletions"], lst)
-
-    # Early exit signal
-    if DELTA_COUNT == 0:
-        logger.info("No new data found in staging. Signalling early pipeline stop.")
-        # Exit code 10 = "Success, but nothing to process"
-        sys.exit(10)
-
-    # Blob Service Client
-    blob_acc = connect_azure_blob().account_name
-
-    # Create directories
-    logger.info("Creating bronze and silver collection folders..")
-    os.makedirs(STAGING_COLL_DIR, exist_ok=True)
-    os.makedirs(MAIN_COLL_DIR, exist_ok=True)
-
-    # Load files
-    books = fetch_documents(collection=staging_db["books"],
-            query={"series": {"$ne": ""}}, flatten=False)
-    user_reads_updates = fetch_documents(staging_db["user_reads"], since=lst)
-    version_ids = {doc["version_id"] for doc in user_reads_updates}
-    book_versions = fetch_documents(collection=staging_db["book_versions"],
-            query={"version_id": {"$in": list(version_ids)}}, flatten=False)
-
-    # Load and map all lookup collections
     lookup_registry = {
-        "creators": {"field": 'creator_id', "get": ["_id", "firstname", "lastname"]},
+        "creators": {"field": "creator_id", "get": ["_id", "firstname", "lastname"]},
         "book_series": {"field": "name", "get": ["_id", "name"]},
         "awards": {"field": 'award_id', "get": "_id"},
         "publishers": {"field": "name", "get": ["_id", "name"]},
@@ -446,7 +520,7 @@ if __name__ == "__main__":
         "users": {"field": "user_id", "get": "_id"},
         "clubs": {"field": "club_id", "get": "_id"},
         "club_reading_periods": {"field": "period_id", "get": "_id"},
-        "genres": {"field": "genre_name", "get": ["_id", "name"]},
+        "genres": {"field": "name", "get": ["_id", "name"]},
         "club_badges": {"field": "name", "get": ["_id", "name"]},
         "user_badges": {"field": "name", "get": ["_id", "name"]},
         "book_versions": {"field": 'version_id', "get": "_id"},
@@ -454,14 +528,9 @@ if __name__ == "__main__":
     }
 
     logger.info("Building in-memory lookup maps from staging database...")
-    lookup_data = load_lookup_data(staging_db, lookup_registry)
+    lookup_data = load_lookup_maps(db, lookup_registry)
 
-    # Close database
-    close_mongodb()
-    logger.success(f"Lookup data loaded and collections successfully saved to {STAGING_COLL_DIR}")
-
-    # Create subdocument registry
-    subdoc_registry= {
+    subdocument_registry = {
         "creators": {
             "pattern": None,
             "transform": lambda name: resolve_creator(name.strip(), lookup_data)
@@ -555,28 +624,47 @@ if __name__ == "__main__":
         }
     }
 
-    # Create context
-    context = {
-        "lookup_data": lookup_data,
-        "subdoc_registry": subdoc_registry,
-        "books": books,
-        "book_versions": book_versions,
-        "blob_account": blob_acc,
-    }
+    return lookup_data, subdocument_registry
 
-    delta_files = [f.stem for f in Path(STAGING_COLL_DIR).glob("*.json")]
 
-    if not delta_files:
-        logger.info("No new deltas found. Transformation skipped.")
-    else:
-        logger.info(f"Dynamically processing {len(delta_files)} collections...")
-        for collection in delta_files:
-            if collection in transform_map:
-                logger.info(f"Transforming: {collection}")
-                transform_collection(collection, transform_map[collection], context=context)
-            else:
-                logger.warning(f"No transformation function mapped for '{collection}'. Skipping.")
+# MAPS
 
-    remove_custom_ids(raw_collections_to_cleanup, STAGING_COLL_DIR)
-    set_custom_ids(collections_to_modify)
-    logger.info("Cleaned collections.")
+# Raw collections to remove custom id fields from
+cleanup_map = {
+    "genres": "genre_id",
+    "publishers": "publisher_id",
+    "tags": "tag_id",
+}
+
+# Raw collections to set _id to custom id
+custom_id_map = {
+    "formats": "format_id",
+    "languages": "language_id",
+    "creator_roles": "cr_id",
+    "read_statuses": "rstatus_id",
+    "club_event_types": "event_type_id",
+    "club_event_statuses": "event_status_id",
+    "user_permissions": "permission_id",
+    "countries": "country_id"
+}
+
+# Collections to transform with collections specific functions
+transform_map = {
+    "club_members": transform_club_members,
+    "club_member_reads": transform_club_member_reads,
+    "club_period_books": transform_club_period_books,
+    "club_discussions": transform_club_discussions,
+    "club_events": transform_club_events,
+    "club_reading_periods": transform_club_reading_periods,
+    "club_badges": transform_club_badges,
+    "clubs": transform_clubs,
+    "user_reads": transform_user_reads,
+    "user_roles": transform_user_roles,
+    "user_badges": transform_user_badges,
+    "users": transform_users,
+    "books": transform_books,
+    "book_versions": transform_book_versions,
+    "book_series": transform_book_series,
+    "creators": transform_creators,
+    "awards": transform_awards,
+}
