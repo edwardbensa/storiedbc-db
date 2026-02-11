@@ -34,6 +34,7 @@ def generate_image_url(doc: dict, url_str: str, img_type: str,
 
 def generate_rlog(doc: dict):
     """Replaces rstatus_history with reading_log."""
+    strftime_fmt = '%Y-%m-%d %H:%M:%S'
     current_rstatus = doc["rstatus_id"]
     if current_rstatus == "rs4":
         doc["reading_log"] = ""
@@ -53,32 +54,32 @@ def generate_rlog(doc: dict):
 
     # Set rstatus_history to now if blank and current_rstatus is "Paused"
     if current_rstatus == "rs3" and rstatus_history == "":
-        rstatus_history = f"rs3: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+        rstatus_history = f"rs3: {datetime.now().strftime(strftime_fmt)}"
 
     # Set start and end entries
-    start = f"rs2: {doc["date_started"]}" if doc["date_started"] != "" else ""
-    end = f"rs1: {doc["date_completed"]}" if doc["date_completed"] != "" else ""
+    start = f"rs2: {doc['date_started']}" if doc["date_started"] != "" else ""
+    end = f"rs1: {doc['date_completed']}" if doc["date_completed"] != "" else ""
 
     # Set start to 7 days before now if blank and current_rstatus is "Paused"
     if start == "" and current_rstatus == "rs3":
         start_date = datetime.now() - timedelta(days=7)
-        start = f"rs2: {start_date.strftime("%Y-%m-%d %H:%M:%S")}"
+        start = f"rs2: {start_date.strftime(strftime_fmt)}"
 
     # Set start to 21 days before end if blank and current_rstatus is "Read"/"Paused"/"DNF"
     if start == "" and current_rstatus in ("rs1", "rs3", "rs5"):
         completed_date = to_datetime(doc["date_completed"])
         if completed_date is not None:
             start_date = completed_date - timedelta(days=21)
-            start = f"rs2: {start_date.strftime("%Y-%m-%d %H:%M:%S")}"
+            start = f"rs2: {start_date.strftime(strftime_fmt)}"
 
     # Set default start and end if both blank and current_rstatus is "Read"/"Reading"/"DNF"
     if start + end == "" and current_rstatus in ("rs1", "rs2", "rs5"):
         start_date = to_datetime("2025-10-10 10:10:10")
         end_date = to_datetime("2025-10-31 20:31:31")
         if start_date is not None:
-            start = f"rs2: {start_date.strftime("%Y-%m-%d %H:%M:%S")}"
+            start = f"rs2: {start_date.strftime(strftime_fmt)}"
         if current_rstatus != "rs2" and end_date is not None:
-            end = f"{current_rstatus}: {end_date.strftime("%Y-%m-%d %H:%M:%S")}"
+            end = f"{current_rstatus}: {end_date.strftime(strftime_fmt)}"
 
     # Create reading log
     r_log = f"{start}, {rstatus_history}" if rstatus_history != "" else start
@@ -105,7 +106,7 @@ def compute_d2r(doc):
 
     # Add "Read" as last token if last_status is "Reading"
     if last_status == "rs2":
-        new_token = f"rs1: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+        new_token = f"rs1: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         tokens.append(new_token)
 
     events = []

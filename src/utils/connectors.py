@@ -8,18 +8,28 @@ from typing import Tuple
 from datetime import datetime
 import gspread
 import requests
-from requests.exceptions import RequestException
+from requests.exceptions import (
+    ConnectionError as RequestsConnectionError, Timeout,
+    HTTPError, RequestException
+)
 from oauth2client.service_account import ServiceAccountCredentials
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import AzureError, ResourceNotFoundError
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError, AutoReconnect, NetworkTimeout, ExecutionTimeout
-from pymongo.errors import ConnectionFailure, ConfigurationError
+from pymongo.errors import (
+    PyMongoError, AutoReconnect, NetworkTimeout, ExecutionTimeout,
+    ConnectionFailure, ConfigurationError
+    )
 from neo4j import GraphDatabase
-from neo4j.exceptions import ServiceUnavailable, AuthError
+from neo4j.exceptions import (
+    AuthError, ServiceUnavailable, TransientError, SessionExpired,
+    DatabaseUnavailable
+)
 from loguru import logger
-from src.config import (gsheet_cred, mongodb_uri, azure_str,
-                        neo4j_uri, neo4j_user, neo4j_pwd)
+from src.config import (
+    gsheet_cred, mongodb_uri, azure_str,
+    neo4j_uri, neo4j_user, neo4j_pwd
+    )
 
 
 class MongoDBConnection:
@@ -272,17 +282,34 @@ def sync_images(db, blob_service_client, container_name, img_type, url_map):
 
 
 RETRYABLE_ERRORS = (
+    # MongoDB
     PyMongoError,
-    gspread.exceptions.APIError,
-    ConnectionError,
-    TimeoutError,
     AutoReconnect,
     NetworkTimeout,
     ExecutionTimeout,
+
+    # Neo4j / AuraDB
+    ServiceUnavailable,
+    TransientError,
+    SessionExpired,
+    DatabaseUnavailable,
+
+    # Google Sheets
+    gspread.exceptions.APIError,
+
+    # HTTP / Network
+    ConnectionError,
+    RequestsConnectionError,
+    TimeoutError,
+    Timeout,
+    HTTPError,  # Only retry on 5xx errors
+
+    # OS-level
+    OSError,  # Socket errors, file descriptor issues
 )
 
 def retry(max_attempts=3, backoff=1.5):
-    """Retry function decorator."""
+    """Retry function decorator with smart HTTP error handling."""
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -292,10 +319,19 @@ def retry(max_attempts=3, backoff=1.5):
             while True:
                 try:
                     result = func(*args, **kwargs)
-                    # attach retry count to the result if it's a dict
                     if isinstance(result, dict):
                         result["_retry_count"] = retry_count
                     return result
+
+                except HTTPError as exc:
+                    # Only retry server errors (5xx), not client errors (4xx)
+                    if exc.response is not None and 500 <= exc.response.status_code < 600:
+                        if attempt >= max_attempts:
+                            raise
+                        # Proceed to retry logic below
+                    else:
+                        # Don't retry 4xx errors (bad request, auth, etc.)
+                        raise
 
                 except RETRYABLE_ERRORS as exc:
                     if attempt >= max_attempts:

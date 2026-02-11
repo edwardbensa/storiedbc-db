@@ -27,11 +27,19 @@ def sync_deletions(driver, db, since):
             label_groups[label].append(str(doc["_id"]))
 
     # Execute batch deletions in AuraDB
-    with driver.session() as session:
-        for label, ids in label_groups.items():
-            query = f"MATCH (n:{label}) WHERE n._id IN $ids DETACH DELETE n"
-            session.run(query, ids=ids)
-            logger.success(f"Deleted {len(ids)} '{label}' nodes from AuraDB.")
+    try:
+        with driver.session() as session:
+            for label, ids in label_groups.items():
+                query = f"MATCH (n:{label}) WHERE n._id IN $ids DETACH DELETE n"
+                result = session.run(query, ids=ids)
+                summary = result.consume()
+                logger.success(
+                    f"Deleted {summary.counters.nodes_deleted} '{label}' nodes "
+                    f"({summary.counters.relationships_deleted} relationships)"
+                )
+    except Exception as e:
+        logger.error(f"Failed to sync deletions: {e}")
+        raise
 
 
 def upsert_nodes(tx, label, rows, id_field="_id"):
@@ -57,6 +65,8 @@ def cleanup_nodes(driver, label_props: dict, batch_size: int = 5000):
     """
     Remove specified properties from nodes of given labels, safely and in batches.
     """
+    max_iterations: int = 1000
+
     for label, props in label_props.items():
         logger.info(f"Cleaning up {label} nodes")
 
@@ -64,7 +74,10 @@ def cleanup_nodes(driver, label_props: dict, batch_size: int = 5000):
         removal_counts = {prop: 0 for prop in props}
 
         for prop in props:
-            while True:
+            iterations = 0
+            while iterations < max_iterations:
+                iterations += 1
+
                 query = f"""
                 MATCH (n:{label})
                 WHERE n.{prop} IS NOT NULL
@@ -309,3 +322,48 @@ def club_book_relationships(tx, club_period_books):
         tx.run(merge_query, rows=merge_rows)
 
     logger.info(f"Created or updated {len(prune_rows)} Club-Book relationships.")
+
+
+# Relationship maps
+
+def get_relationships(data):
+    """Return relationship mapping."""
+
+    rel_maps = [
+        ({"labels": ["Book", "Genre"], "props": ["genre", "name"]},
+         "HAS_GENRE", data["books"]),
+        ({"labels": ["BookVersion", "Book"], "props": ["book_id", "_id"]},
+         "VERSION_OF", data["book_versions"]),
+        ({"labels": ["Book", "BookSeries"], "props": ["series_id", "_id"]},
+         "ENTRY_IN", data["books"]),
+        ({"labels": ["Book", "Creator"], "props": ["author_id", "_id"]},
+         "AUTHORED_BY", data["books"]),
+        ({"labels": ["BookVersion", "Creator"], "props": ["narrator_id", "_id"]},
+         "NARRATED_BY", data["book_versions"]),
+        ({"labels": ["BookVersion", "Creator"], "props": ["cover_artist_id", "_id"]},
+         "COVER_ART_BY", data["book_versions"]),
+        ({"labels": ["BookVersion", "Creator"], "props": ["illustrator_id", "_id"]},
+         "ILLUSTRATION_BY", data["book_versions"]),
+        ({"labels": ["BookVersion", "Creator"], "props": ["translator_id", "_id"]},
+         "TRANSLATED_BY", data["book_versions"]),
+        ({"labels": ["BookVersion", "Publisher"], "props": ["publisher_id", "_id"]},
+         "PUBLISHED_BY", data["book_versions"]),
+        ({"labels": ["BookVersion", "Language"], "props": ["language", "name"]},
+         "HAS_LANGUAGE", data["book_versions"]),
+        ({"labels": ["BookVersion", "Format"], "props": ["format", "name"]},
+         "HAS_FORMAT", data["book_versions"]),
+        ({"labels": ["Creator", "CreatorRole"], "props": ["roles", "name"]},
+         "HAS_ROLE", data["creators"]),
+        ({"labels": ["User", "Club"], "props": ["club_ids", "_id"]},
+         "MEMBER_OF", data["users"]),
+        ({"labels": ["User", "Country"], "props": ["country", "name"]},
+         "LIVES_IN", data["users"]),
+        ({"labels": ["User", "Genre"], "props": ["preferred_genres", "name"]},
+         "PREFERS_GENRE", data["users"]),
+        ({"labels": ["User", "Genre"], "props": ["forbidden_genres", "name"]},
+         "AVOIDS_GENRE", data["users"]),
+        ({"labels": ["Club", "Genre"], "props": ["preferred_genres", "name"]},
+         "PREFERS_GENRE", data["clubs"]),
+    ]
+
+    return rel_maps

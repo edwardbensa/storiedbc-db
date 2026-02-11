@@ -55,10 +55,14 @@ def process_books(books):
         award_docs = [i for i in book_awards if i["book_id"] == _id]
 
         for ad in award_docs:
-            award = ad["award_name"]
-            if ad["award_category"] != "":
-                award = f'{ad["award_name"]} for {ad["award_category"]}'
-            awards_list.append(f"{award}, {ad["award_year"]}, {ad["award_status"]}")
+            award_name = ad["award_name"]
+            award_cat = ad["award_category"]
+            award = award_name if award_cat == "" else f"{award_name} for {award_cat}"
+
+            award_year = ad["award_year"]
+            award_status = ad["award_status"]
+
+            awards_list.append(f"{award}, {award_year}, {award_status}")
 
         str_awards = "; ".join(str(i) for i in awards_list)
         ba_map[_id] = str_awards
@@ -75,15 +79,15 @@ def process_books(books):
     for book in books:
         try:
             combo = (
-                f"Title: {book["title"]}"
-                f"\n\nAuthor: {", ".join(str(k) for k in book["author"])}"
-                f"\n\nGenres: {", ".join(str(k) for k in book["genre"])}"
-                f"\n\nDescription: {book["description"]}"
+                f"Title: {book['title']}"
+                f"\n\nAuthor: {', '.join(str(k) for k in book['author'])}"
+                f"\n\nGenres: {', '.join(str(k) for k in book['genre'])}"
+                f"\n\nDescription: {book['description']}"
                 )
             descriptions.append(combo)
             valid_books.append(book)
         except KeyError:
-            logger.warning(f"Description not found for {book["title"]}")
+            logger.warning(f"Description not found for {book['title']}")
             continue
 
     if descriptions:

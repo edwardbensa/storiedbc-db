@@ -26,7 +26,7 @@ def main():
     run_script("src/etl/extract_gsheet.py")
 
     # Phase 2: Staging to Main
-    staging2main_status = run_script("src/etl/transform_staging2main.py") 
+    staging2main_status = run_script("src/etl/transform_staging2main.py")
 
     if staging2main_status == 0:
         run_script("src/etl/load_mongo.py")

@@ -52,40 +52,44 @@ def drop_all_collections(db):
 
     close_mongodb()
 
-
-def upsert_documents(db, collection_name, documents, timestamp=None, key="_id"):
-    """Bulk upsert multiple documents into a MongoDB collection."""
+def upsert_documents(db, collection_name, documents, timestamp=None,
+                     key="_id", batch_size=1000):
+    """Bulk upsert into a MongoDB collection with chunking."""
     if collection_name not in db.list_collection_names():
         logger.info(f"Collection '{collection_name}' does not exist yet. Creating...")
 
     collection = db[collection_name]
-    ops = []
-
-    # Use provided timestamp or current time as fallback
     final_ts = timestamp or datetime.now()
+    
+    total_inserted = 0
+    total_updated = 0
 
-    for doc in documents:
-        if key not in doc:
-            raise ValueError(f"Document missing required key '{key}': {doc}")
+    # Process in chunks
+    for i in range(0, len(documents), batch_size):
+        chunk = documents[i:i + batch_size]
+        ops = []
+        
+        for doc in chunk:
+            if key not in doc:
+                raise ValueError(f"Document missing required key '{key}': {doc}")
 
-        # Ensure query with ObjectId if the key is _id to avoid "not found" errors
-        query_val = doc[key]
-        if key == "_id" and isinstance(query_val, str):
-            query_val = ObjectId(query_val)
+            query_val = doc[key]
+            if key == "_id" and isinstance(query_val, str):
+                query_val = ObjectId(query_val)
 
-        # Apply the timestamp to the document
-        doc["updated_at"] = final_ts
+            doc["updated_at"] = final_ts
+            update_payload = {k: v for k, v in doc.items() if k != key}
+            ops.append(UpdateOne({key: query_val}, {"$set": update_payload}, upsert=True))
 
-        update_payload = {k: v for k, v in doc.items() if k != key}
+        if ops:
+            result = collection.bulk_write(ops, ordered=False)
+            total_inserted += result.upserted_count
+            total_updated += result.modified_count
 
-        ops.append(UpdateOne({key: query_val}, {"$set": update_payload}, upsert=True))
-
-    if ops:
-        result = collection.bulk_write(ops, ordered=False)
-        logger.success(
-            f"Bulk upsert complete for '{collection_name}': "
-            f"{result.upserted_count} inserted, {result.modified_count} updated."
-        )
+    logger.success(
+        f"Bulk upsert complete for '{collection_name}': "
+        f"{total_inserted} inserted, {total_updated} updated."
+    )
 
 def fetch_documents(collection, exclude_fields=None, field_map=None,
                     since=None, flatten=True, query=None) -> list:

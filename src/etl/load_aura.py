@@ -6,13 +6,15 @@ import datetime
 from pathlib import Path
 from loguru import logger
 from pymongo.errors import PyMongoError
-from src.utils.connectors import connect_mongodb, close_mongodb, connect_auradb, retry
 from src.utils.ops_mongo import update_sync_state
 from src.utils.ops_aura import (
     upsert_nodes, ensure_constraints, create_relationships, user_reads_relationships,
     badges_relationships, book_awards_relationships, club_book_relationships,
-    cleanup_nodes, sync_deletions,
-)
+    cleanup_nodes, sync_deletions, get_relationships
+    )
+from src.utils.connectors import (
+    connect_mongodb, close_mongodb, connect_auradb, retry, RETRYABLE_ERRORS
+    )
 from src.config import AURA_COLL_DIR
 
 
@@ -168,46 +170,13 @@ class AuraSyncPipeline:
         try:
             with self.neo4j_driver.session() as session:
                 # Relationship maps
-                rel_maps = [
-                    ({"labels": ["Book", "Genre"], "props": ["genre", "name"]},
-                     "HAS_GENRE", data["books"]),
-                    ({"labels": ["BookVersion", "Book"], "props": ["book_id", "_id"]},
-                     "VERSION_OF", data["book_versions"]),
-                    ({"labels": ["Book", "BookSeries"], "props": ["series_id", "_id"]},
-                     "ENTRY_IN", data["books"]),
-                    ({"labels": ["Book", "Creator"], "props": ["author_id", "_id"]},
-                     "AUTHORED_BY", data["books"]),
-                    ({"labels": ["BookVersion", "Creator"], "props": ["narrator_id", "_id"]},
-                     "NARRATED_BY", data["book_versions"]),
-                    ({"labels": ["BookVersion", "Creator"], "props": ["cover_artist_id", "_id"]},
-                     "COVER_ART_BY", data["book_versions"]),
-                    ({"labels": ["BookVersion", "Creator"], "props": ["illustrator_id", "_id"]},
-                     "ILLUSTRATION_BY", data["book_versions"]),
-                    ({"labels": ["BookVersion", "Creator"], "props": ["translator_id", "_id"]},
-                     "TRANSLATED_BY", data["book_versions"]),
-                    ({"labels": ["BookVersion", "Publisher"], "props": ["publisher_id", "_id"]},
-                     "PUBLISHED_BY", data["book_versions"]),
-                    ({"labels": ["BookVersion", "Language"], "props": ["language", "name"]},
-                     "HAS_LANGUAGE", data["book_versions"]),
-                    ({"labels": ["BookVersion", "Format"], "props": ["format", "name"]},
-                     "HAS_FORMAT", data["book_versions"]),
-                    ({"labels": ["Creator", "CreatorRole"], "props": ["roles", "name"]},
-                     "HAS_ROLE", data["creators"]),
-                    ({"labels": ["User", "Club"], "props": ["club_ids", "_id"]},
-                     "MEMBER_OF", data["users"]),
-                    ({"labels": ["User", "Country"], "props": ["country", "name"]},
-                     "LIVES_IN", data["users"]),
-                    ({"labels": ["User", "Genre"], "props": ["preferred_genres", "name"]},
-                     "PREFERS_GENRE", data["users"]),
-                    ({"labels": ["User", "Genre"], "props": ["forbidden_genres", "name"]},
-                     "AVOIDS_GENRE", data["users"]),
-                    ({"labels": ["Club", "Genre"], "props": ["preferred_genres", "name"]},
-                     "PREFERS_GENRE", data["clubs"]),
-                ]
+                rel_maps = get_relationships(data)
 
                 for rel_map, rel_type, source_docs in rel_maps:
                     try:
                         session.execute_write(create_relationships, rel_map, rel_type, source_docs)
+                    except RETRYABLE_ERRORS:
+                        raise
                     except Exception as exc: # pylint: disable=W0718
                         self.log_error("load_relationships", exc, extra_context={"rel_type": rel_type}) # pylint: disable=C0301
 
@@ -228,7 +197,7 @@ class AuraSyncPipeline:
     @retry(max_attempts=3, backoff=2)
     def run_cleanup(self):
         """Cleanup temporary properties from nodes."""
-        cleanup_dict = {
+        cleanup_map = {
             "Book": ["author_id", "series_id"],
             "BookVersion": [
                 "book_id",
@@ -246,7 +215,7 @@ class AuraSyncPipeline:
         retry_count = 0
 
         try:
-            cleanup_nodes(self.neo4j_driver, cleanup_dict)
+            cleanup_nodes(self.neo4j_driver, cleanup_map)
             return {"inserted": 0}
         except Exception as exc: # pylint: disable=W0718
             self.log_error("cleanup", exc)

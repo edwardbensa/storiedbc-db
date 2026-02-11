@@ -1,0 +1,40 @@
+name: Weekly Book Club ETL
+
+on:
+  schedule:
+    # Runs at 00:00 every Monday
+    - cron: '0 0 * * 1'
+  workflow_dispatch: # Allows manual triggering for testing
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Reconstruct Config Files
+        run: |
+          # Create the secrets directory
+          mkdir -p src/secrets
+          
+          # Write the .env file to the root
+          echo "${{ secrets.ENV_FILE }}" > .env
+          
+          # Write the Google Sheets credentials JSON
+          # Ensure the filename matches what's in your src.config
+          echo "${{ secrets.GSHEET_CRED_JSON }}" > src/secrets/gsheet_creds.json
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Run ETL
+        run: |
+          # Use docker-compose to build and run
+          # This will trigger the model download during the build
+          docker compose up --build --abort-on-container-exit
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

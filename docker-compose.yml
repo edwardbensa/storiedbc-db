@@ -1,0 +1,21 @@
+services:
+  etl-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: sbc_etl
+    # Map root .env file to container's environment
+    env_file:
+      - .env
+    volumes:
+      # Persist data directories to inspect deltas/JSONs locally
+      - ./data:/app/data
+      # Mount the secrets folder to run locally
+      - ./src/secrets:/app/src/secrets
+    # Exit after ETL script finishes
+    restart: "no"
+    # Resource limits if embedding model is heavy on memory
+    deploy:
+      resources:
+        limits:
+          memory: 4G
