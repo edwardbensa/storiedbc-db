@@ -179,47 +179,65 @@ def add_hashes(documents, id_fields):
 
 def find_deltas(old_documents, new_documents):
     """
-    Categorizes records into New, Updated, Deleted, and Unchanged.
+    Categorises records into New, Updated, Deleted, and Unchanged.
+
     Returns:
         to_upsert: List of new and changed docs to write to DB.
         diff: Metadata about what happened for removals/logging/stats.
     """
-    # Index by id_hash
+
+    # Index new docs by id_hash
     new_lookup = {doc["id_hash"]: doc for doc in new_documents}
 
     to_upsert = []
     diff = {"new": [], "updated": [], "unchanged": [], "deleted": []}
     matched_new_hashes = set()
 
-    # Find deletions, unchanged, and updates (iterate old)
+    ignore_keys = ("_id", "full_hash", "id_hash", "updated_at")
+
+    # Compare old to new
     for old_doc in old_documents:
         id_hash = old_doc["id_hash"]
         new_doc = new_lookup.get(id_hash)
 
-        if not new_doc:
+        # No matching new doc -> deleted
+        if new_doc is None:
             diff["deleted"].append(old_doc)
             continue
 
         matched_new_hashes.add(id_hash)
 
-        if old_doc["full_hash"] == new_doc["full_hash"]:
+        # If full_hash matches, treat as unchanged
+        if old_doc.get("full_hash") == new_doc.get("full_hash"):
             diff["unchanged"].append(old_doc)
             continue
 
-        # Content changed
+        # Compute field‑level changes (symmetric)
         changes = {}
-        for key, new_val in new_doc.items():
-            if key in ("_id", "full_hash", "id_hash", "updated_at"):
+        all_keys = set(old_doc.keys()) | set(new_doc.keys())
+
+        for key in all_keys:
+            if key in ignore_keys:
                 continue
+
             old_val = old_doc.get(key)
+            new_val = new_doc.get(key)
+
             if old_val != new_val:
                 changes[key] = {"from": old_val, "to": new_val}
 
-        updated_doc = {"_id": old_doc["_id"], **new_doc}
-        to_upsert.append(updated_doc)
-        diff["updated"].append({"_id": old_doc["_id"], "id_hash": id_hash, "changes": changes})
+        # Build updated doc, preserving old _id
+        clean_new = {k: v for k, v in new_doc.items() if k != "_id"}
+        updated_doc = {"_id": old_doc["_id"], **clean_new}
 
-    # Find new records (iterate new)
+        to_upsert.append(updated_doc)
+        diff["updated"].append({
+            "_id": old_doc["_id"],
+            "id_hash": id_hash,
+            "changes": changes
+        })
+
+    # Find new records
     for new_doc in new_documents:
         if new_doc["id_hash"] not in matched_new_hashes:
             new_entry = {"_id": ObjectId(), **new_doc}

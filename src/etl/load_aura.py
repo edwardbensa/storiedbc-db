@@ -6,15 +6,16 @@ import datetime
 from pathlib import Path
 from loguru import logger
 from pymongo.errors import PyMongoError
-from src.utils.ops_mongo import update_sync_state
+from src.utils.ops_mongo import load_sync_state, update_sync_state
 from src.utils.ops_aura import (
     upsert_nodes, ensure_constraints, create_relationships, user_reads_relationships,
     badges_relationships, book_awards_relationships, club_book_relationships,
-    cleanup_nodes, sync_deletions, get_relationships
+    cleanup_nodes, sync_deletions, deduplicate_nodes, get_relationships
     )
 from src.utils.connectors import (
     connect_mongodb, close_mongodb, connect_auradb, retry, RETRYABLE_ERRORS
     )
+from src.utils.transform_for_aura import collection_label_map
 from src.config import AURA_COLL_DIR
 
 
@@ -32,6 +33,7 @@ class AuraSyncPipeline:
         # Batch metadata
         self.timestamp = datetime.datetime.now()
         self.batch_id = time.strftime("%Y%m%d-%H%M%S")
+        self.lst = load_sync_state(self.etl_db, self.SYNC_KEY)
 
         # Directory with staged JSON files
         self.input_dir = Path(AURA_COLL_DIR)
@@ -181,11 +183,16 @@ class AuraSyncPipeline:
                         self.log_error("load_relationships", exc, extra_context={"rel_type": rel_type}) # pylint: disable=C0301
 
                 # Additional relationship functions
-                session.execute_write(user_reads_relationships, data["user_reads"])
-                session.execute_write(badges_relationships, data["users"], "User")
-                session.execute_write(badges_relationships, data["clubs"], "Club")
-                session.execute_write(book_awards_relationships, data["books"], data["book_awards"])
-                session.execute_write(club_book_relationships, data["club_period_books"])
+                if data.get("user_reads", None):
+                    session.execute_write(user_reads_relationships, data["user_reads"])
+                if data.get("users", None):
+                    session.execute_write(badges_relationships, data["users"], "User")
+                if data.get("clubs", None):
+                    session.execute_write(badges_relationships, data["clubs"], "Club")
+                if data.get("book_awards", None):
+                    session.execute_write(book_awards_relationships, data["books"], data["book_awards"])
+                if data.get("club_period_books", None):
+                    session.execute_write(club_book_relationships, data["club_period_books"])
 
             return {"inserted": 0}
 
@@ -268,7 +275,7 @@ class AuraSyncPipeline:
         self.ensure_constraints()
 
         # Sync deletions
-        sync_deletions(self.neo4j_driver, self.db, self.timestamp)
+        sync_deletions(self.neo4j_driver, self.db, self.lst)
 
         # Load nodes
         node_stats = self.load_nodes({
@@ -294,6 +301,9 @@ class AuraSyncPipeline:
 
         # Cleanup
         cleanup_stats = self.run_cleanup()
+        labels = list(collection_label_map.values())
+        for label in labels:
+            deduplicate_nodes(self.neo4j_driver, label)
 
         # Update sync state
         self.update_sync_state()

@@ -244,6 +244,11 @@ def build_extraction_config(db, lst):
         "badge_timestamps": "badges.timestamp",
     }
 
+    cpb_map = {
+        "period_id": "period._id",
+        "period_name": "period.name",
+    }
+
     excluded_user_fields = [
         "firstname",
         "lastname",
@@ -344,6 +349,7 @@ def build_extraction_config(db, lst):
         },
         "club_period_books": {
             "collection": db["club_period_books"],
+            "field_map": cpb_map,
             "since": lst,
         },
         "club_reading_periods": {
@@ -359,11 +365,13 @@ def build_extraction_config(db, lst):
 
 def transform_collections(results):
     """Enrich and transform collections."""
+    logger.info("Transforming collections...")
 
     # Enrich users
     current_year = datetime.now().year
     users = results.get("users", [])
     if users:
+        logger.info("Processing users documents...")
         for user in users:
             goals = user.get("reading_goal", [])
             user["reading_goal"] = next(
@@ -374,36 +382,35 @@ def transform_collections(results):
                 country = decrypt_field(user["country"], user["key_version"])
                 user["country"] = country
             user.pop("key_version", None)
+        logger.info(f"Processing complete. Transformed {len(users)} users documents...")
 
     # Enrich creators
     creators = results.get("creators", [])
     if creators:
+        logger.info("Processing creators documents...")
         for creator in creators:
             firstname = creator.get("firstname", "")
             lastname = creator.get("lastname")
             creator["name"] = (
                 f"{firstname} {lastname}".strip() if lastname else firstname
             )
+        logger.info(f"Processing complete. Transformed {len(creators)} creators documents...")
 
     # Process books into books + book_awards
     books = results.get("books", [])
     if books:
+        logger.info("Processing books documents...")
         books, book_awards = process_books(books)
         results["books"] = books
         results["book_awards"] = book_awards
+        logger.info(f"Processing complete. Transformed {len(books)} books documents...")
 
     # Process user reads
     user_reads = results.get("user_reads", [])
     if user_reads:
+        logger.info("Processing user_reads documents...")
         user_reads = process_ur(user_reads)
         results["user_reads"] = user_reads
-
-    # Enrich club period books
-    cpb = results.get("club_period_books", [])
-    crp = results.get("club_reading_periods", [])
-    if cpb and crp:
-        for i in cpb:
-            i["period_name"] = [k["name"] for k in crp if k["_id"] == i["period_id"]][0]
-        results["club_period_books"] = cpb
+        logger.info(f"Processing complete. Transformed {len(user_reads)} user_reads documents...")
 
     return results

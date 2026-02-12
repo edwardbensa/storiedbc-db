@@ -253,9 +253,9 @@ if __name__ == "__main__":
     db = connect_mongodb("staging")
 
     id_map = {
-        "books": ["title", "genre"],
-        "book_versions": ["isbn_13", "asin"],
-        "creators": ["firstname", "lastname"],
+        "books": ["book_id"],
+        "book_versions": ["version_id"],
+        "creators": ["creator_id"],
         "creator_roles": ["name"],
         "genres": ["name"],
         "book_series": ["name"],

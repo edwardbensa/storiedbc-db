@@ -52,6 +52,7 @@ def drop_all_collections(db):
 
     close_mongodb()
 
+
 def upsert_documents(db, collection_name, documents, timestamp=None,
                      key="_id", batch_size=1000):
     """Bulk upsert into a MongoDB collection with chunking."""
@@ -60,7 +61,7 @@ def upsert_documents(db, collection_name, documents, timestamp=None,
 
     collection = db[collection_name]
     final_ts = timestamp or datetime.now()
-    
+
     total_inserted = 0
     total_updated = 0
 
@@ -68,7 +69,7 @@ def upsert_documents(db, collection_name, documents, timestamp=None,
     for i in range(0, len(documents), batch_size):
         chunk = documents[i:i + batch_size]
         ops = []
-        
+
         for doc in chunk:
             if key not in doc:
                 raise ValueError(f"Document missing required key '{key}': {doc}")
@@ -90,6 +91,7 @@ def upsert_documents(db, collection_name, documents, timestamp=None,
         f"Bulk upsert complete for '{collection_name}': "
         f"{total_inserted} inserted, {total_updated} updated."
     )
+
 
 def fetch_documents(collection, exclude_fields=None, field_map=None,
                     since=None, flatten=True, query=None) -> list:
@@ -126,6 +128,7 @@ def fetch_documents(collection, exclude_fields=None, field_map=None,
 
     return docs
 
+
 def download_collections(db, output_dir, excluded_collections: list, since: datetime):
     """
     Downloads all collections (except excluded) since specified timestamp as JSON.
@@ -157,12 +160,14 @@ def download_collections(db, output_dir, excluded_collections: list, since: date
     logger.success("Downloads complete.")
     return files_created
 
+
 def load_sync_state(etl_db, _id: str):
     """Load sync state (last sync time) from MongoDB."""
     doc = etl_db.sync_states.find_one({"_id": _id})
     if doc and "last_sync_time" in doc:
         return doc["last_sync_time"]
     return datetime(2026, 1, 1)
+
 
 def update_sync_state(etl_db, _id, timestamp, batch_id):
     """Update sync state in MongoDB."""

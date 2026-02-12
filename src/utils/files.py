@@ -30,8 +30,8 @@ def wipe_directory(directory, terminate: bool=True):
 
 def generate_image_filename(doc: dict, img_type: str):
     """
-    Generate a hashed filename for a profile image using a unique field entry.
-    Also generates a hashed filename for a book cover using the first valid unique identifier
+    Generates a hashed filename for a profile image using a unique field entry.
+    Generates a hashed filename for a book cover using the first valid unique identifier
     where prefix is based on the index of the identifier in the list.
     """
     if img_type not in ["user", "club", "cover", "creator"]:

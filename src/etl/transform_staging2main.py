@@ -69,12 +69,21 @@ if __name__ == "__main__":
     if not delta_files:
         logger.info("No new deltas found. Transformation skipped.")
     else:
+        # Remove map entries not in delta files
+        transform_map = {k: v for k, v in transform_map.items() if k in delta_files}
+        cleanup_map = {k: v for k, v in cleanup_map.items() if k in delta_files}
+        custom_id_map = {k: v for k, v in custom_id_map.items() if k in delta_files}
+
         logger.info(f"Dynamically processing {len(delta_files)} collections...")
         for collection in delta_files:
             if collection in transform_map:
                 logger.info(f"Transforming: {collection}")
                 transform_collection(collection, transform_map[collection], context=context)
 
-    remove_custom_ids(cleanup_map, STAGING_COLL_DIR)
-    set_custom_ids(custom_id_map)
-    logger.info("Cleaned collections.")
+        # Cleanup
+        logger.info("Starting cleanup.")
+        if cleanup_map:
+            remove_custom_ids(cleanup_map)
+        if custom_id_map:
+            set_custom_ids(custom_id_map)
+        logger.info("Cleaned collections.")

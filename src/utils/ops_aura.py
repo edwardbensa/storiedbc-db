@@ -42,6 +42,43 @@ def sync_deletions(driver, db, since):
         raise
 
 
+def deduplicate_nodes(driver, label, identifier="_id"):
+    """
+    Removes duplicate nodes in Neo4j Aura based on the specified identifier property.
+    Keeps one node per identifier and deletes all others (including relationships).
+
+    Parameters:
+        driver: Neo4j driver instance
+        label (str): Node label to check for duplicates (e.g., "Person")
+
+    Returns:
+        int: Number of duplicate nodes deleted
+    """
+
+    delete_query = f"""
+    MATCH (n:{label})
+    WHERE n.{identifier} IS NOT NULL
+    WITH n.{identifier} AS id, collect(n) AS nodes
+    WHERE size(nodes) > 1
+    CALL (nodes) {{
+        WITH nodes
+        WITH nodes[0] AS keep, nodes[1..] AS duplicates
+        UNWIND duplicates AS d
+        DETACH DELETE d
+        RETURN count(d) AS deleted_count
+    }}
+    RETURN sum(deleted_count) AS total_deleted
+    """
+
+    with driver.session() as session:
+        result = session.run(delete_query)
+        deleted_count = result.single()["total_deleted"] or 0
+
+    logger.info(f"Number of duplicate nodes deleted for {label} label: {deleted_count}")
+
+    return deleted_count
+
+
 def upsert_nodes(tx, label, rows, id_field="_id"):
     """Generic AuraDB upsert function"""
     query = f"""

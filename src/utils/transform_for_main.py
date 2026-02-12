@@ -16,6 +16,131 @@ from .parsers import to_int, to_float, to_array, make_subdocuments, clean_docume
 
 # pylint: disable=W0613
 
+
+# LOOKUP DATA AND SUBDOCUMENT REGISTRY
+
+def build_registries(db):
+    """
+    Returns lookup data for _id reference
+    and subdocument registry for parsing flat fields.
+    """
+
+    lookup_registry = {
+        "creators": {"field": "creator_id", "get": ["_id", "firstname", "lastname"]},
+        "book_series": {"field": "name", "get": ["_id", "name"]},
+        "awards": {"field": 'award_id', "get": "_id"},
+        "publishers": {"field": "name", "get": ["_id", "name"]},
+        "books": {"field": "book_id", "get": "_id"},
+        "users": {"field": "user_id", "get": "_id"},
+        "clubs": {"field": "club_id", "get": "_id"},
+        "club_reading_periods": {"field": "period_id", "get": ["_id", "name"]},
+        "genres": {"field": "name", "get": ["_id", "name"]},
+        "club_badges": {"field": "name", "get": ["_id", "name"]},
+        "user_badges": {"field": "name", "get": ["_id", "name"]},
+        "book_versions": {"field": 'version_id', "get": "_id"},
+        "read_statuses": {"field": 'rstatus_id', "get": "name"},
+    }
+
+    logger.info("Building in-memory lookup maps from staging database...")
+    lookup_data = load_lookup_maps(db, lookup_registry)
+
+    subdocument_registry = {
+        "creators": {
+            "pattern": None,
+            "transform": lambda name: resolve_creator(name.strip(), lookup_data)
+        },
+        "awards": {
+            "pattern": re.compile(
+                r"award_id:\s*(\w+);\s*"
+                r"award_name:\s*(.*?);\s*"
+                r"award_category:\s*(.*?);\s*"
+                r"year:\s*(\d{4});\s*"
+                r"award_status:\s*(\w+)"
+            ),
+            "transform": lambda match: resolve_awards(match, lookup_data)
+        },
+        "votes": {
+            "pattern": re.compile(r"user_id:\s*(\w+),\s*vote_date:\s*(\d{4}-\d{2}-\d{2})"),
+            "transform": lambda match: {
+                "user_id": lookup_data["users"].get(match.group(1)),
+                "timestamp": match.group(2)
+            }
+        },
+        "club_discussions": {
+            "pattern": re.compile(
+                r"user_id:\s*(\w+);\s*comment:\s*(.+?);\s*timestamp:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})" # pylint: disable=C0301
+            ),
+            "transform": lambda match: {
+                "user_id": lookup_data["users"].get(match.group(1)),
+                "comment": match.group(2).strip(),
+                "timestamp": match.group(3)
+            }
+        },
+        "club_genres": {
+            "pattern": None,
+            "transform": lambda genre_name: lookup_data["genres"].get(genre_name.strip())
+        },
+        "join_requests": {
+            "pattern": re.compile(r"user_id:\s*(\w+),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})"),
+            "transform": lambda match: {
+                "user_id": lookup_data["users"].get(match.group(1)),
+                "timestamp": match.group(2)
+            }
+        },
+        "club_badges": {
+            "pattern": re.compile(r"badge:\s*(.+?),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})"),
+            "transform": lambda match: {
+                **resolve_lookup("club_badges", match.group(1), lookup_data), # type: ignore
+                "timestamp": match.group(2)
+            }
+        },
+        'reading_log': {
+            'pattern': re.compile(r'(.+):\s*(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)'),
+            'transform': lambda match: {
+                "rstatus": resolve_lookup('read_statuses', match.group(1), lookup_data),
+                "timestamp": match.group(2)
+            }
+        },
+        'reading_goal': {
+            'pattern': re.compile(r'year:\s*(\d+),\s*goal:\s*(\d+)'),
+            'transform': lambda match: {
+                "year": to_int(match.group(1)),
+                "goal": to_int(match.group(2))
+            }
+        },
+        'user_badges': {
+            'pattern': re.compile(r'badge:\s*(.+?),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})'),
+            'transform': lambda match: {
+                **resolve_lookup('user_badges', match.group(1), lookup_data), # type: ignore
+                "timestamp": match.group(2)
+            }
+        },
+        'preferred_genres': {
+            'pattern': None,
+            'transform': lambda genre_name: resolve_lookup('genres', genre_name, lookup_data)
+        },
+        "clubs": {
+            "pattern": re.compile(
+                r"_id:\s*(\w+),\s*role:\s*(\w+),\s*joined:\s*(\d{4}-\d{2}-\d{2})"
+            ),
+            "transform": lambda match: {
+                "_id": lookup_data["clubs"].get(match.group(1)),
+                "role": match.group(2)
+            }
+        },
+        "tiers": {
+            "pattern": re.compile(r"name:\s*(.*?),\s*threshold:\s*(\d+),\s*message:\s*(.*)"),
+            "transform": lambda match: {
+                "name": match.group(1).strip(),
+                "threshold": int(match.group(2)),
+                "message": match.group(3).strip()
+            }
+        }
+    }
+
+    return lookup_data, subdocument_registry
+
+
 # GENERAL FUNCTIONS
 
 def transform_collection(collection_name: str, transform_func, *, context):
@@ -54,12 +179,12 @@ def transform_collection(collection_name: str, transform_func, *, context):
         logger.error(f"Error transforming '{collection_name}': {e}")
 
 
-def remove_custom_ids(collections_to_cleanup: dict, source_directory):
+def remove_custom_ids(collections_to_cleanup: dict):
     """
     Removes specified custom ID fields from each collection in the source directory,
     and writes the cleaned output to MAIN_COLL_DIR.
     """
-    source_directory = Path(source_directory)
+    source_directory = Path(STAGING_COLL_DIR)
     output_directory = Path(MAIN_COLL_DIR)
 
     for collection_name, id_field in collections_to_cleanup.items():
@@ -254,7 +379,7 @@ def transform_club_member_reads(doc, *, context):
         "club_id": lookup_data["clubs"].get(doc.get("club_id")),
         "user_id": lookup_data["users"].get(doc.get("user_id")),
         "book_id": lookup_data["books"].get(doc.get("book_id")),
-        "period_id": lookup_data["club_reading_periods"].get(doc.get("period_id")),
+        "period_id": lookup_data["club_reading_periods"].get(doc.get("period_id"))["_id"],
         "read_date": doc.get("read_date"),
         "timestamp": str(datetime.now())
     }
@@ -270,7 +395,7 @@ def transform_club_period_books(doc, *, context):
         "_id": doc.get("_id"),
         "club_id": lookup_data["clubs"].get(doc.get("club_id")),
         "book_id": lookup_data["books"].get(doc.get("book_id")),
-        "period_id": lookup_data["club_reading_periods"].get(doc.get("period_id")),
+        "period": lookup_data["club_reading_periods"].get(doc.get("period_id")),
         "period_startdate": doc.get("period_startdate"),
         "period_enddate": doc.get("period_enddate"),
         "selected_by": lookup_data["users"].get(doc.get("selected_by")),
@@ -501,130 +626,6 @@ def transform_awards(doc, *, context):
         "year_started": to_int(doc.get("year_started")),
         "year_ended": to_int(doc.get("year_ended"))
     }
-
-
-# LOOKUP DATA AND SUBDOCUMENT REGISTRY
-
-def build_registries(db):
-    """
-    Returns lookup data for _id reference
-    and subdocument registry for parsing flat fields.
-    """
-
-    lookup_registry = {
-        "creators": {"field": "creator_id", "get": ["_id", "firstname", "lastname"]},
-        "book_series": {"field": "name", "get": ["_id", "name"]},
-        "awards": {"field": 'award_id', "get": "_id"},
-        "publishers": {"field": "name", "get": ["_id", "name"]},
-        "books": {"field": "book_id", "get": "_id"},
-        "users": {"field": "user_id", "get": "_id"},
-        "clubs": {"field": "club_id", "get": "_id"},
-        "club_reading_periods": {"field": "period_id", "get": "_id"},
-        "genres": {"field": "name", "get": ["_id", "name"]},
-        "club_badges": {"field": "name", "get": ["_id", "name"]},
-        "user_badges": {"field": "name", "get": ["_id", "name"]},
-        "book_versions": {"field": 'version_id', "get": "_id"},
-        "read_statuses": {"field": 'rstatus_id', "get": "name"},
-    }
-
-    logger.info("Building in-memory lookup maps from staging database...")
-    lookup_data = load_lookup_maps(db, lookup_registry)
-
-    subdocument_registry = {
-        "creators": {
-            "pattern": None,
-            "transform": lambda name: resolve_creator(name.strip(), lookup_data)
-        },
-        "awards": {
-            "pattern": re.compile(
-                r"award_id:\s*(\w+);\s*"
-                r"award_name:\s*(.*?);\s*"
-                r"award_category:\s*(.*?);\s*"
-                r"year:\s*(\d{4});\s*"
-                r"award_status:\s*(\w+)"
-            ),
-            "transform": lambda match: resolve_awards(match, lookup_data)
-        },
-        "votes": {
-            "pattern": re.compile(r"user_id:\s*(\w+),\s*vote_date:\s*(\d{4}-\d{2}-\d{2})"),
-            "transform": lambda match: {
-                "user_id": lookup_data["users"].get(match.group(1)),
-                "timestamp": match.group(2)
-            }
-        },
-        "club_discussions": {
-            "pattern": re.compile(
-                r"user_id:\s*(\w+);\s*comment:\s*(.+?);\s*timestamp:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})" # pylint: disable=C0301
-            ),
-            "transform": lambda match: {
-                "user_id": lookup_data["users"].get(match.group(1)),
-                "comment": match.group(2).strip(),
-                "timestamp": match.group(3)
-            }
-        },
-        "club_genres": {
-            "pattern": None,
-            "transform": lambda genre_name: lookup_data["genres"].get(genre_name.strip())
-        },
-        "join_requests": {
-            "pattern": re.compile(r"user_id:\s*(\w+),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})"),
-            "transform": lambda match: {
-                "user_id": lookup_data["users"].get(match.group(1)),
-                "timestamp": match.group(2)
-            }
-        },
-        "club_badges": {
-            "pattern": re.compile(r"badge:\s*(.+?),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})"),
-            "transform": lambda match: {
-                **resolve_lookup("club_badges", match.group(1), lookup_data), # type: ignore
-                "timestamp": match.group(2)
-            }
-        },
-        'reading_log': {
-            'pattern': re.compile(r'(.+):\s*(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)'),
-            'transform': lambda match: {
-                "rstatus": resolve_lookup('read_statuses', match.group(1), lookup_data),
-                "timestamp": match.group(2)
-            }
-        },
-        'reading_goal': {
-            'pattern': re.compile(r'year:\s*(\d+),\s*goal:\s*(\d+)'),
-            'transform': lambda match: {
-                "year": to_int(match.group(1)),
-                "goal": to_int(match.group(2))
-            }
-        },
-        'user_badges': {
-            'pattern': re.compile(r'badge:\s*(.+?),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})'),
-            'transform': lambda match: {
-                **resolve_lookup('user_badges', match.group(1), lookup_data), # type: ignore
-                "timestamp": match.group(2)
-            }
-        },
-        'preferred_genres': {
-            'pattern': None,
-            'transform': lambda genre_name: resolve_lookup('genres', genre_name, lookup_data)
-        },
-        "clubs": {
-            "pattern": re.compile(
-                r"_id:\s*(\w+),\s*role:\s*(\w+),\s*joined:\s*(\d{4}-\d{2}-\d{2})"
-            ),
-            "transform": lambda match: {
-                "_id": lookup_data["clubs"].get(match.group(1)),
-                "role": match.group(2)
-            }
-        },
-        "tiers": {
-            "pattern": re.compile(r"name:\s*(.*?),\s*threshold:\s*(\d+),\s*message:\s*(.*)"),
-            "transform": lambda match: {
-                "name": match.group(1).strip(),
-                "threshold": int(match.group(2)),
-                "message": match.group(3).strip()
-            }
-        }
-    }
-
-    return lookup_data, subdocument_registry
 
 
 # MAPS
