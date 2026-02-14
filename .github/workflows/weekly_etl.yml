@@ -20,19 +20,13 @@ jobs:
           mkdir -p src/secrets
           
           # Write the .env file to the root
-          cat << 'EOF' > .env
-          ${{ secrets.ENV_FILE }}
-          EOF
+          echo "${{ secrets.ENV_FILE }}" > .env
           
           # Write the Google Sheets credentials JSON to src/secrets
-          cat << 'EOF' > src/secrets/gsheet_creds.json
-          ${{ secrets.GSHEET_CRED_JSON }}
-          EOF
+          echo '${{ secrets.GSHEET_CRED_JSON }}' > src/secrets/gsheet_creds.json
 
           # Write the local encryption keys JSON to src/secrets
-          cat << 'EOF' > src/secrets/key_registry.json
-          ${{ secrets.ENCRYPTION_KEYS_JSON }}
-          EOF
+          echo '${{ secrets.ENCRYPTION_KEYS_JSON }}' > src/secrets/key_registry.json
       
       - name: Debug .env and secrets
         run: |
@@ -47,7 +41,7 @@ jobs:
 
       - name: Build and Run ETL
         working-directory: ${{ github.workspace }}
-        run: docker compose up --build --abort-on-container-exit
+        run: docker compose --env-file .env up --build --abort-on-container-exit
 
       - name: Cleanup
         if: always()
