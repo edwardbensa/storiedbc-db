@@ -9,7 +9,6 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    environment: etl
 
     steps:
       - name: Checkout Code
