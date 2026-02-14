@@ -31,7 +31,7 @@ jobs:
 
           # Write the local encryption keys JSON to src/secrets
           cat << 'EOF' > src/secrets/key_registry.json
-          ${{ secrets.ENCRYPTION_KEYS }}
+          ${{ secrets.ENCRYPTION_KEYS_JSON }}
           EOF
 
       - name: Set up Docker Buildx
