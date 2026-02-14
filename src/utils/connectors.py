@@ -30,6 +30,7 @@ from src.config import (
     gsheet_cred, mongodb_uri, azure_str,
     neo4j_uri, neo4j_user, neo4j_pwd
     )
+from .ops_mongo import load_sync_state, update_sync_state
 
 
 class MongoDBConnection:
@@ -220,65 +221,82 @@ def wipe_container(blob_service_client, container_name: str,
         return False, deleted_count
 
 
-def sync_images(db, blob_service_client, container_name, img_type, url_map):
+def sync_images(etl_db, blob_service_client, img_type, container_name):
     """
-    Syncs images directly from source URLs to Azure Blob Storage container.
-    Uploads new files and deletes obsolete files based on log comparisons.
-    URL map: { filename: source_url }
+    Incrementally sync images to Azure Blob Storage based on per-file inventory docs.
+
+    Uploads:
+        inventory_images where:
+            img_type = img_type AND
+            deleted = False AND
+            updated_at > last_sync_time
+
+    Deletions:
+        inventory_images where:
+            img_type = img_type AND
+            deleted = True AND
+            updated_at > last_sync_time
     """
-    if img_type not in ["user", "club", "cover"]:
-        raise ValueError("Type must be either 'user', 'club', or 'cover'")
-    img_type_map = {"user": "user_dp", "club": "club_dp", "cover": "cover_art"}
-    img_type = img_type_map[img_type]
 
-    container_client = blob_service_client.get_container_client(container_name)
+    # Load sync state
+    sync_id = f"sync_{img_type}"
+    lst = load_sync_state(etl_db, sync_id)
 
-    # Fetch known state from MongoDB
-    log_doc = db["metadata"].find_one({"_id": f"inventory_{img_type}"})
-    known_filenames = set(log_doc["filenames"]) if log_doc else set()
-    desired_filenames = set(url_map.keys())
+    container = blob_service_client.get_container_client(container_name)
 
-    # Identify deltas
-    to_upload = desired_filenames - known_filenames
-    to_delete = known_filenames - desired_filenames
+    # Query inventory for uploads
+    to_upload = list(etl_db["inventory_images"].find({
+        "img_type": img_type,
+        "deleted": False,
+        "updated_at": {"$gt": lst}
+    }))
 
-    # Handle deletions in Azure
-    try:
-        for filename in to_delete:
-            try:
-                container_client.delete_blob(filename)
-                logger.info(f"Deleted obsolete blob: {filename}")
-            except ResourceNotFoundError:
-                pass # Already gone
+    # Query inventory for deletions
+    to_delete = list(etl_db["inventory_images"].find({
+        "img_type": img_type,
+        "deleted": True,
+        "updated_at": {"$gt": lst}
+    }))
 
-        # Stream uploads to Azure (source -> memory -> Azure)
-        for filename in to_upload:
-            source_url = url_map[filename]
-            try:
-                # Stream the image into memory
-                response = requests.get(source_url, stream=True, timeout=15)
-                if response.status_code == 200:
-                    blob_client = container_client.get_blob_client(filename)
-                    # upload_blob accepts the raw response stream
-                    blob_client.upload_blob(response.raw, overwrite=True)
-                    logger.success(f"Streamed and uploaded: {filename}")
-                else:
-                    logger.warning(f"Failed to fetch: {source_url} (HTTP {response.status_code})")
-            except (RequestException, AzureError) as e:
-                logger.error(f"Error streaming {filename}: {e}")
+    logger.info(f"{len(to_upload)} uploads, {len(to_delete)} deletions pending for {img_type}")
 
-        # Update known state in MongoDB
-        db["metadata"].update_one(
-            {"_id": f"inventory_{img_type}"},
-            {"$set": {
-                "filenames": list(desired_filenames),
-                "updated_at": datetime.now(timezone.utc)
-            }},
-            upsert=True
-        )
-    except AzureError as e:
-        logger.error(f"Critical error accessing container '{container_name}': {e}")
-        sys.exit()
+    # Perform deletions
+    for item in to_delete:
+        filename = item["_id"]
+        try:
+            container.delete_blob(filename)
+            logger.info(f"Deleted blob: {filename}")
+        except ResourceNotFoundError:
+            pass
+        except AzureError as e:
+            logger.error(f"Azure deletion error for {filename}: {e}")
+
+    # Perform uploads
+    for item in to_upload:
+        filename = item["_id"]
+        source_url = item["source_url"]
+
+        try:
+            response = requests.get(source_url, stream=True, timeout=15)
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch {source_url} (HTTP {response.status_code})")
+                continue
+
+            blob = container.get_blob_client(filename)
+            blob.upload_blob(response.raw, overwrite=True)
+            logger.success(f"Uploaded: {filename}")
+
+        except (RequestException, AzureError) as e:
+            logger.error(f"Upload error for {filename}: {e}")
+
+    # Update sync state
+    update_sync_state(
+        etl_db,
+        sync_id,
+        timestamp=datetime.now(timezone.utc),
+        batch_id=time.strftime("%Y%m%d-%H%M%S"))
+
+    logger.success(f"Sync complete for {img_type}. Updated sync state.")
 
 
 RETRYABLE_ERRORS = (

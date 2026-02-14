@@ -9,9 +9,7 @@ from .parsers import to_int
 
 # Load lookup collections
 def load_lookup_maps(db, lookup_registry: dict) -> dict:
-    """
-    Builds lookup maps by fetching directly from MongoDB.
-    """
+    """Builds lookup maps by fetching directly from MongoDB."""
     lookup_maps = {}
 
     for name, config in lookup_registry.items():

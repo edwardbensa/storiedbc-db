@@ -40,7 +40,7 @@ def archive_delete(db, collection_name, filter_query):
         deletions.insert_one(archived_doc)
 
         # Delete from original collection
-        result = source.delete_one({"_id": doc["original_id"]})
+        result = source.delete_one({"_id": original_id})
 
         return {
             "deleted": result.deleted_count == 1,
@@ -177,7 +177,6 @@ def fetch_documents(collection, exclude_fields=None, field_map=None,
     projection = {field: 0 for field in exclude_fields}
 
     docs = list(collection.find(query, projection))
-    #docs = [{k: safe_value(v) for k, v in doc.items()} for doc in docs]
 
     if flatten:
         flattened = []
@@ -231,7 +230,7 @@ def load_sync_state(etl_db, _id: str):
     return datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def update_sync_state(etl_db, _id, timestamp, batch_id):
+def update_sync_state(etl_db, _id: str, timestamp: datetime, batch_id):
     """Update sync state in MongoDB."""
     etl_db.sync_states.update_one(
         {"_id": _id},
@@ -241,3 +240,66 @@ def update_sync_state(etl_db, _id, timestamp, batch_id):
         }},
         upsert=True
     )
+
+
+def update_inventory(etl_db, img_type, doc, filename, url_field, source_collection):
+    """Upsert a single inventory record for an image."""
+
+    # Build new values
+    original_id = doc.get("_id")
+    source_url = doc.get(url_field)
+    source_coll = source_collection
+    deleted = False
+
+    if not source_url:
+        logger.warning(f"No source URL in '{url_field}' for filename '{filename}'. Skipping.")
+        return
+
+    coll = etl_db["inventory_images"]
+    existing = coll.find_one({"_id": filename})
+
+    # New entry. Upsert
+    if not existing:
+        coll.insert_one({
+            "_id": filename,
+            "img_type": img_type,
+            "original_id": original_id,
+            "source_collection": source_coll,
+            "source_url": source_url,
+            "deleted": deleted,
+            "updated_at": datetime.now(timezone.utc)
+            })
+        logger.info(f"New inventory item added for {filename} ({img_type})")
+        return
+
+    old_original_id = existing.get("original_id")
+    old_source_url = existing.get("source_url")
+    old_source_coll = existing.get("source_collection")
+    old_deleted = existing.get("deleted", False)
+
+    # Determine what changed
+    metadata_changed = old_original_id != original_id or old_source_coll != source_coll
+    content_changed = old_source_url != source_url or old_deleted != deleted
+
+    # Nothing changed. Do nothing
+    if not metadata_changed and not content_changed:
+        logger.debug(f"Applied no changes to {filename} ({img_type})")
+        return
+
+    update_fields = {
+        "original_id": original_id,
+        "source_collection": source_coll,
+        "source_url": source_url,
+        "deleted": deleted
+        }
+
+    # Only metadata changed. Update without changing updated_at
+    if metadata_changed and not content_changed:
+        coll.update_one({"_id": filename}, {"$set": update_fields})
+        logger.info(f"Updated metadata for {filename} ({img_type})")
+        return
+
+    # Content changed. Update with updated_at bump
+    update_fields["updated_at"] = datetime.now(timezone.utc)
+    coll.update_one({"_id": filename}, {"$set": update_fields})
+    logger.info(f"Updated content for {filename} ({img_type}). Changes will sync")
