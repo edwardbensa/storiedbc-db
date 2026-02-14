@@ -31,7 +31,7 @@ class AuraSyncPipeline:
         self.neo4j_driver = connect_auradb()
 
         # Batch metadata
-        self.timestamp = datetime.datetime.now()
+        self.timestamp = datetime.datetime.now(datetime.timezone.utc)
         self.batch_id = time.strftime("%Y%m%d-%H%M%S")
         self.lst = load_sync_state(self.etl_db, self.SYNC_KEY)
 

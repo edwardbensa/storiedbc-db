@@ -3,54 +3,116 @@
 # Imports
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 from bson import ObjectId
 from pymongo import UpdateOne
-from .connectors import close_mongodb
 from .parsers import safe_value, flatten_document
 
 
 def archive_delete(db, collection_name, filter_query):
-    """Archive doc in deletions collection and delete from original."""
+    """Archive document in deletions collection and delete from original."""
     source = db[collection_name]
     deletions = db["deletions"]
 
-    # Ensure _id in filter_query is ObjectId
-    if "_id" in filter_query and isinstance(filter_query["_id"], str):
-        filter_query["_id"] = ObjectId(filter_query["_id"])
+    try:
+        # Ensure _id in filter_query is ObjectId
+        query = filter_query.copy()
+        if "_id" in query and isinstance(query["_id"], str):
+            query["_id"] = ObjectId(query["_id"])
 
-    # Find document
-    doc = source.find_one(filter_query)
-    if not doc:
-        return {"deleted": False, "archived": False, "reason": "Document not found"}
+        # Find document
+        doc = source.find_one(query)
+        if not doc:
+            return {"deleted": False, "archived": False, "reason": "Document not found"}
 
-    # Prepare archived version
-    archived_doc = {
-        **doc,
-        "original_collection": collection_name,
-        "deleted_at": datetime.now()
-    }
+        # Prepare archived version
+        original_id = doc.pop("_id")
+        archived_doc = {
+            "_id": ObjectId(),
+            **doc,
+            "original_id": original_id,
+            "original_collection": collection_name,
+            "deleted_at": datetime.now(timezone.utc)
+            }
 
-    # Insert into deletions collection
-    deletions.insert_one(archived_doc)
+        # Insert into deletions collection
+        deletions.insert_one(archived_doc)
 
-    # Delete from original collection
-    result = source.delete_one({"_id": doc["_id"]})
+        # Delete from original collection
+        result = source.delete_one({"_id": doc["original_id"]})
 
-    return {
-        "deleted": result.deleted_count == 1,
-        "archived": True,
-        "id": str(doc["_id"])
-    }
+        return {
+            "deleted": result.deleted_count == 1,
+            "archived": True,
+            "archived_id": str(archived_doc["_id"]),
+            "original_id": str(original_id)
+        }
+    except Exception as e: # pylint: disable=W0718
+        logger.exception(
+            f"archive_delete: Error archiving/deleting from {collection_name} "
+            f"with query={filter_query}: {e}"
+            )
+        return {
+            "deleted": False,
+            "archived": False,
+            "error": str(e)
+            }
+
+
+def sync_deletions(main_db, staging_db, since):
+    """Sync deletion records from staging into main DB."""
+    try:
+        # Ensure timestamp is timezone-aware
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+
+        query = {"deleted_at": {"$gt": since}}
+        logger.debug(f"sync_deletions: Fetching staging deletions since {since}")
+
+        deletions = list(staging_db["deletions"].find(query))
+
+        if not deletions:
+            logger.info("sync_deletions: No new deletions to sync.")
+            return {"synced": 0}
+
+        synced_count = 0
+
+        for doc in deletions:
+            try:
+                original_id = doc.get("original_id")
+                collection_name = doc.get("original_collection")
+
+                if not original_id or not collection_name:
+                    logger.warning(f"Skipping malformed deletion record: {doc}")
+                    continue
+
+                logger.debug(f"Syncing {original_id} deletion from collection '{collection_name}")
+
+                result = archive_delete(main_db, collection_name, {"_id": original_id})
+
+                if result.get("deleted"):
+                    synced_count += 1
+                else:
+                    logger.warning(f"Could not delete {original_id}. in main DB: {result}")
+
+            except Exception as inner_err: # pylint: disable=W0718
+                logger.exception(f"Error syncing deletion record {doc}: {inner_err}")
+
+        logger.info(f"Completed. Synced {synced_count} deletions.")
+
+        return {"synced": synced_count}
+
+    except Exception as e: # pylint: disable=W0718
+        logger.exception(f"Fatal error during sync: {e}")
+        return {"synced": 0, "error": str(e)}
+
 
 def drop_all_collections(db):
     """Drop all existing collections"""
     for name in db.list_collection_names():
         db.drop_collection(name)
         logger.info(f"Dropped collection '{name}'")
-
-    close_mongodb()
 
 
 def upsert_documents(db, collection_name, documents, timestamp=None,
@@ -60,7 +122,7 @@ def upsert_documents(db, collection_name, documents, timestamp=None,
         logger.info(f"Collection '{collection_name}' does not exist yet. Creating...")
 
     collection = db[collection_name]
-    final_ts = timestamp or datetime.now()
+    final_ts = timestamp or datetime.now(timezone.utc)
 
     total_inserted = 0
     total_updated = 0
@@ -166,7 +228,7 @@ def load_sync_state(etl_db, _id: str):
     doc = etl_db.sync_states.find_one({"_id": _id})
     if doc and "last_sync_time" in doc:
         return doc["last_sync_time"]
-    return datetime(2026, 1, 1)
+    return datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def update_sync_state(etl_db, _id, timestamp, batch_id):

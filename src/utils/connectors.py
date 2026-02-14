@@ -5,7 +5,7 @@ import sys
 import time
 import functools
 from typing import Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import gspread
 import requests
 from requests.exceptions import (
@@ -272,7 +272,7 @@ def sync_images(db, blob_service_client, container_name, img_type, url_map):
             {"_id": f"inventory_{img_type}"},
             {"$set": {
                 "filenames": list(desired_filenames),
-                "updated_at": datetime.now()
+                "updated_at": datetime.now(timezone.utc)
             }},
             upsert=True
         )

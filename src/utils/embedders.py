@@ -51,7 +51,7 @@ class GemmaEmbedder:
     def vectorise_many(self, texts: list[str], as_numpy=False):
         """Vectorise a list of text."""
         model = self.load()
-        vecs = model.encode(texts)
+        vecs = model.encode(texts, show_progress_bar=True)
 
         if as_numpy:
             return np.asarray(vecs)

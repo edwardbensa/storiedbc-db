@@ -2,7 +2,7 @@
 
 # Imports
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from loguru import logger
 from .files import generate_image_filename
@@ -54,7 +54,7 @@ def generate_rlog(doc: dict):
 
     # Set rstatus_history to now if blank and current_rstatus is "Paused"
     if current_rstatus == "rs3" and rstatus_history == "":
-        rstatus_history = f"rs3: {datetime.now().strftime(strftime_fmt)}"
+        rstatus_history = f"rs3: {datetime.now(timezone.utc).strftime(strftime_fmt)}"
 
     # Set start and end entries
     start = f"rs2: {doc['date_started']}" if doc["date_started"] != "" else ""
@@ -62,7 +62,7 @@ def generate_rlog(doc: dict):
 
     # Set start to 7 days before now if blank and current_rstatus is "Paused"
     if start == "" and current_rstatus == "rs3":
-        start_date = datetime.now() - timedelta(days=7)
+        start_date = datetime.now(timezone.utc) - timedelta(days=7)
         start = f"rs2: {start_date.strftime(strftime_fmt)}"
 
     # Set start to 21 days before end if blank and current_rstatus is "Read"/"Paused"/"DNF"
@@ -106,7 +106,7 @@ def compute_d2r(doc):
 
     # Add "Read" as last token if last_status is "Reading"
     if last_status == "rs2":
-        new_token = f"rs1: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        new_token = f"rs1: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
         tokens.append(new_token)
 
     events = []

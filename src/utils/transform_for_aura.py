@@ -93,6 +93,7 @@ def process_books(books):
     if descriptions:
         model = GemmaEmbedder.instance()
         try:
+            logger.info("Vectorising enriched descriptions...")
             embeddings = model.vectorise_many(descriptions)
             for i, book in enumerate(valid_books):
                 book["description_embedding"] = embeddings[i]

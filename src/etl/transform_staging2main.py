@@ -7,10 +7,7 @@ from pathlib import Path
 from loguru import logger
 from src.utils.ops_mongo import download_collections, load_sync_state, fetch_documents
 from src.utils.connectors import connect_azure_blob, connect_mongodb, close_mongodb
-from src.utils.transform_for_main import (
-    build_registries, transform_collection, remove_custom_ids, set_custom_ids,
-    transform_map, cleanup_map, custom_id_map
-    )
+from src.utils.transform_for_main import build_registries, transform_collection, transform_map
 from src.config import STAGING_COLL_DIR, MAIN_COLL_DIR
 
 
@@ -57,7 +54,7 @@ if __name__ == "__main__":
 
     # Create context
     context = {
-        "lookup_data": lookup_maps,
+        "lookup_map": lookup_maps,
         "subdoc_registry": subdoc_registry,
         "books": books,
         "book_versions": book_versions,
@@ -71,19 +68,9 @@ if __name__ == "__main__":
     else:
         # Remove map entries not in delta files
         transform_map = {k: v for k, v in transform_map.items() if k in delta_files}
-        cleanup_map = {k: v for k, v in cleanup_map.items() if k in delta_files}
-        custom_id_map = {k: v for k, v in custom_id_map.items() if k in delta_files}
 
         logger.info(f"Dynamically processing {len(delta_files)} collections...")
         for collection in delta_files:
             if collection in transform_map:
                 logger.info(f"Transforming: {collection}")
                 transform_collection(collection, transform_map[collection], context=context)
-
-        # Cleanup
-        logger.info("Starting cleanup.")
-        if cleanup_map:
-            remove_custom_ids(cleanup_map)
-        if custom_id_map:
-            set_custom_ids(custom_id_map)
-        logger.info("Cleaned collections.")

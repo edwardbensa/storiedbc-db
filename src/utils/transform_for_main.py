@@ -4,8 +4,7 @@
 import os
 import re
 import json
-from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 from src.config import STAGING_COLL_DIR, MAIN_COLL_DIR
 from .security import encrypt_pii, hash_password, latest_key_version
@@ -42,12 +41,12 @@ def build_registries(db):
     }
 
     logger.info("Building in-memory lookup maps from staging database...")
-    lookup_data = load_lookup_maps(db, lookup_registry)
+    lookup_map = load_lookup_maps(db, lookup_registry)
 
     subdocument_registry = {
         "creators": {
             "pattern": None,
-            "transform": lambda name: resolve_creator(name.strip(), lookup_data)
+            "transform": lambda name: resolve_creator(name.strip(), lookup_map)
         },
         "awards": {
             "pattern": re.compile(
@@ -57,12 +56,12 @@ def build_registries(db):
                 r"year:\s*(\d{4});\s*"
                 r"award_status:\s*(\w+)"
             ),
-            "transform": lambda match: resolve_awards(match, lookup_data)
+            "transform": lambda match: resolve_awards(match, lookup_map)
         },
         "votes": {
             "pattern": re.compile(r"user_id:\s*(\w+),\s*vote_date:\s*(\d{4}-\d{2}-\d{2})"),
             "transform": lambda match: {
-                "user_id": lookup_data["users"].get(match.group(1)),
+                "user_id": lookup_map["users"].get(match.group(1)),
                 "timestamp": match.group(2)
             }
         },
@@ -71,33 +70,33 @@ def build_registries(db):
                 r"user_id:\s*(\w+);\s*comment:\s*(.+?);\s*timestamp:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})" # pylint: disable=C0301
             ),
             "transform": lambda match: {
-                "user_id": lookup_data["users"].get(match.group(1)),
+                "user_id": lookup_map["users"].get(match.group(1)),
                 "comment": match.group(2).strip(),
                 "timestamp": match.group(3)
             }
         },
         "club_genres": {
             "pattern": None,
-            "transform": lambda genre_name: lookup_data["genres"].get(genre_name.strip())
+            "transform": lambda genre_name: lookup_map["genres"].get(genre_name.strip())
         },
         "join_requests": {
             "pattern": re.compile(r"user_id:\s*(\w+),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})"),
             "transform": lambda match: {
-                "user_id": lookup_data["users"].get(match.group(1)),
+                "user_id": lookup_map["users"].get(match.group(1)),
                 "timestamp": match.group(2)
             }
         },
         "club_badges": {
             "pattern": re.compile(r"badge:\s*(.+?),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})"),
             "transform": lambda match: {
-                **resolve_lookup("club_badges", match.group(1), lookup_data), # type: ignore
+                **resolve_lookup("club_badges", match.group(1), lookup_map), # type: ignore
                 "timestamp": match.group(2)
             }
         },
         'reading_log': {
             'pattern': re.compile(r'(.+):\s*(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)'),
             'transform': lambda match: {
-                "rstatus": resolve_lookup('read_statuses', match.group(1), lookup_data),
+                "rstatus": resolve_lookup('read_statuses', match.group(1), lookup_map),
                 "timestamp": match.group(2)
             }
         },
@@ -111,20 +110,20 @@ def build_registries(db):
         'user_badges': {
             'pattern': re.compile(r'badge:\s*(.+?),\s*timestamp:\s*(\d{4}-\d{2}-\d{2})'),
             'transform': lambda match: {
-                **resolve_lookup('user_badges', match.group(1), lookup_data), # type: ignore
+                **resolve_lookup('user_badges', match.group(1), lookup_map), # type: ignore
                 "timestamp": match.group(2)
             }
         },
         'preferred_genres': {
             'pattern': None,
-            'transform': lambda genre_name: resolve_lookup('genres', genre_name, lookup_data)
+            'transform': lambda genre_name: resolve_lookup('genres', genre_name, lookup_map)
         },
         "clubs": {
             "pattern": re.compile(
                 r"_id:\s*(\w+),\s*role:\s*(\w+),\s*joined:\s*(\d{4}-\d{2}-\d{2})"
             ),
             "transform": lambda match: {
-                "_id": lookup_data["clubs"].get(match.group(1)),
+                "_id": lookup_map["clubs"].get(match.group(1)),
                 "role": match.group(2)
             }
         },
@@ -138,12 +137,12 @@ def build_registries(db):
         }
     }
 
-    return lookup_data, subdocument_registry
+    return lookup_map, subdocument_registry
 
 
 # GENERAL FUNCTIONS
 
-def transform_collection(collection_name: str, transform_func, *, context):
+def transform_collection(collection_name: str, transform_func, *, context=None):
     """
     Loads a raw JSON collection, transforms each document,
     and writes the result to MAIN_COLL_DIR.
@@ -179,84 +178,6 @@ def transform_collection(collection_name: str, transform_func, *, context):
         logger.error(f"Error transforming '{collection_name}': {e}")
 
 
-def remove_custom_ids(collections_to_cleanup: dict):
-    """
-    Removes specified custom ID fields from each collection in the source directory,
-    and writes the cleaned output to MAIN_COLL_DIR.
-    """
-    source_directory = Path(STAGING_COLL_DIR)
-    output_directory = Path(MAIN_COLL_DIR)
-
-    for collection_name, id_field in collections_to_cleanup.items():
-        input_path = source_directory / f"{collection_name}.json"
-        output_path = output_directory / f"{collection_name}.json"
-
-        try:
-            with input_path.open(encoding="utf-8") as f:
-                data = json.load(f)
-            logger.info(f"Loaded {len(data)} documents from '{input_path.name}'")
-
-            cleaned = []
-            for doc in data:
-                doc.pop(id_field, None)
-                doc, _ = clean_document(doc, remove_ts=True)
-                cleaned.append(doc)
-
-            with output_path.open("w", encoding="utf-8") as f:
-                json.dump(cleaned, f, ensure_ascii=False, indent=2)
-
-            logger.success(f"Removed '{id_field}' from all documents in '{collection_name}.json'")
-
-        except FileNotFoundError:
-            logger.warning(f"File not found: {input_path}")
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.error(f"Failed to process '{input_path.name}': {e}")
-
-
-def set_custom_ids(collections: dict):
-    """
-    Replaces the _id field in each document with the value from the specified custom ID field.
-    Reads from source_directory and writes to MAIN_COLL_DIR.
-    """
-    transformed_dir = Path(MAIN_COLL_DIR)
-    raw_dir = Path(STAGING_COLL_DIR)
-
-    for collection_name, custom_id_field in collections.items():
-        transformed_path = transformed_dir / f"{collection_name}.json"
-        raw_path = raw_dir / f"{collection_name}.json"
-
-        if transformed_path.exists():
-            input_path = transformed_path
-        else:
-            logger.info(f"Transforming raw file: {raw_path}...")
-            input_path = raw_path
-
-        output_path = transformed_path
-
-        try:
-            with input_path.open(encoding="utf-8") as f:
-                data = json.load(f)
-            logger.info(f"Loaded {len(data)} documents from '{input_path.name}'")
-
-            updated = []
-            for doc in data:
-                doc, _ = clean_document(doc, remove_ts=True)
-                if custom_id_field in doc:
-                    doc["_id"] = str(doc[custom_id_field])
-                    doc.pop(custom_id_field, None)
-                updated.append(doc)
-
-            with output_path.open("w", encoding="utf-8") as f:
-                json.dump(updated, f, ensure_ascii=False, indent=2)
-
-            logger.success(f"Set _id to '{custom_id_field}' in all '{collection_name}' documents.")
-
-        except FileNotFoundError:
-            logger.warning(f"File not found: {input_path}")
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.error(f"Failed to process '{input_path.name}': {e}")
-
-
 def add_read_details(doc, book_versions):
     """Add reading log, days to read, and read rates."""
 
@@ -282,43 +203,37 @@ def add_read_details(doc, book_versions):
     return doc
 
 
-
 # COLLECTION SPECIFIC FUNCTIONS
 
 def transform_books(doc, *, context):
-    """
-    Transforms a books document to the desired structure.
-    """
-    lookups = context["lookup_data"]
+    """Transforms a books document to the desired structure."""
+    lookups = context["lookup_map"]
     subdoc_reg = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
-        "book_id": doc.get("book_id"),
-        "title": doc.get("title"),
-        "author": make_subdocuments(doc.get("author"), "creators", subdoc_reg, separator=','),
+        "title": str(doc.get("title")),
+        "author": make_subdocuments(doc.get("author"), "creators", subdoc_reg, ','),
         "genre": to_array(doc.get("genre")),
         "series": resolve_lookup('book_series', doc.get("series"), lookups),
         "series_index": to_int(doc.get("series_index")),
         "description": doc.get("description"),
         "first_publication_date": doc.get("first_publication_date"),
-        "contributors": make_subdocuments(doc.get("contributors"), "creators", subdoc_reg,','),
-        "awards": make_subdocuments(doc.get("awards"), "awards", subdoc_reg, separator='|'),
+        "contributors": make_subdocuments(doc.get("contributors"), "creators", subdoc_reg, ','),
+        "awards": make_subdocuments(doc.get("awards"), "awards", subdoc_reg, '|'),
         "tags": to_array(doc.get("tags")),
         "date_added": doc.get("date_added")
     }
 
 def transform_book_versions(doc, *, context):
-    """
-    Transforms a book_versions document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a book_versions document to the desired structure."""
+    lookup_map = context["lookup_map"]
+    subdoc_reg = context["subdoc_registry"]
     blob_acc = context["blob_account"]
 
     return {
         "_id": doc.get("_id"),
-        "book_id": resolve_lookup('books', doc.get("book_id"), lookup_data),
+        "book_id": resolve_lookup('books', doc.get("book_id"), lookup_map),
         "title": doc.get("title"),
         "isbn_13": to_int(doc.get("isbn_13")),
         "asin": doc.get("asin"),
@@ -328,21 +243,19 @@ def transform_book_versions(doc, *, context):
         "page_count": to_int(doc.get("page_count")),
         "length_hours": to_float(doc.get("length")),
         "description": doc.get("description"),
-        "publisher": resolve_lookup('publishers', doc.get("publisher"), lookup_data),
+        "publisher": resolve_lookup('publishers', doc.get("publisher"), lookup_map),
         "language": doc.get("language"),
-        "translator": make_subdocuments(doc.get("translator"), "creators", subdoc_registry, ','),
-        "narrator": make_subdocuments(doc.get("narrator"), "creators", subdoc_registry, ','),
-        "illustrator": make_subdocuments(doc.get("illustrator"), "creators", subdoc_registry, ','),
-        "editors": make_subdocuments(doc.get("editors"), "creators", subdoc_registry, ','),
-        "cover_artist": make_subdocuments(doc.get("cover_artist"), "creators", subdoc_registry,','),
+        "translator": make_subdocuments(doc.get("translator"), "creators", subdoc_reg, ','),
+        "narrator": make_subdocuments(doc.get("narrator"), "creators", subdoc_reg, ','),
+        "illustrator": make_subdocuments(doc.get("illustrator"), "creators", subdoc_reg, ','),
+        "editors": make_subdocuments(doc.get("editors"), "creators", subdoc_reg, ','),
+        "cover_artist": make_subdocuments(doc.get("cover_artist"), "creators", subdoc_reg,','),
         "cover_url": generate_image_url(doc, doc.get("cover_url"), "cover", "cover-art", blob_acc),
         "date_added": doc.get("date_added")
     }
 
 def transform_book_series(doc, *, context):
-    """
-    Transforms a book_series document to the desired structure.
-    """
+    """Transforms a book_series document to the desired structure."""
     books = context["books"]
     filtered_books = [b for b in books if b["series"] == doc.get("name")]
     filtered_books.sort(key=lambda b: b["series_index"])
@@ -356,136 +269,137 @@ def transform_book_series(doc, *, context):
     }
 
 def transform_club_members(doc, *, context):
-    """
-    Transforms a club_members document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
+    """Transforms a club_members document to the desired structure."""
+    lookup_map = context["lookup_map"]
+
     return {
         "_id": doc.get("_id"),
-        "club_id": lookup_data["clubs"].get(doc.get("club_id")),
-        "user_id": lookup_data["users"].get(doc.get("user_id")),
+        "club_id": lookup_map["clubs"].get(doc.get("club_id")),
+        "user_id": lookup_map["users"].get(doc.get("user_id")),
         "role": doc.get("role"),
         "date_joined": doc.get("date_joined"),
         "is_active": doc.get("is_active") == "TRUE",
     }
 
 def transform_club_member_reads(doc, *, context):
-    """
-    Transforms a club_member_reads document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
+    """Transforms a club_member_reads document to the desired structure."""
+    lookup_map = context["lookup_map"]
+
     return {
         "_id": doc.get("_id"),
-        "club_id": lookup_data["clubs"].get(doc.get("club_id")),
-        "user_id": lookup_data["users"].get(doc.get("user_id")),
-        "book_id": lookup_data["books"].get(doc.get("book_id")),
-        "period_id": lookup_data["club_reading_periods"].get(doc.get("period_id"))["_id"],
+        "club_id": lookup_map["clubs"].get(doc.get("club_id")),
+        "user_id": lookup_map["users"].get(doc.get("user_id")),
+        "book_id": lookup_map["books"].get(doc.get("book_id")),
+        "period_id": lookup_map["club_reading_periods"].get(doc.get("period_id"))["_id"],
         "read_date": doc.get("read_date"),
-        "timestamp": str(datetime.now())
+        "timestamp": str(datetime.now(timezone.utc))
     }
 
 def transform_club_period_books(doc, *, context):
-    """
-    Transforms a club_period_books document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a club_period_books document to the desired structure."""
+    lookup_map = context["lookup_map"]
+    subdoc_reg = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
-        "club_id": lookup_data["clubs"].get(doc.get("club_id")),
-        "book_id": lookup_data["books"].get(doc.get("book_id")),
-        "period": lookup_data["club_reading_periods"].get(doc.get("period_id")),
+        "club_id": lookup_map["clubs"].get(doc.get("club_id")),
+        "book_id": lookup_map["books"].get(doc.get("book_id")),
+        "period": lookup_map["club_reading_periods"].get(doc.get("period_id")),
         "period_startdate": doc.get("period_startdate"),
         "period_enddate": doc.get("period_enddate"),
-        "selected_by": lookup_data["users"].get(doc.get("selected_by")),
+        "selected_by": lookup_map["users"].get(doc.get("selected_by")),
         "selection_method": doc.get("selection_method"),
-        "votes": make_subdocuments(doc.get("votes"), "votes", subdoc_registry, separator=";"),
+        "votes": make_subdocuments(doc.get("votes"), "votes", subdoc_reg, ";"),
         "votes_startdate": doc.get("votes_startdate"),
         "votes_enddate": doc.get("votes_enddate"),
         "selection_status": doc.get("selection_status"),
-        "date_added": str(datetime.now())
+        "date_added": str(datetime.now(timezone.utc))
     }
 
 def transform_club_discussions(doc, *, context):
-    """
-    Transforms a club_discussions document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a club_discussions document to the desired structure."""
+    lookup_map = context["lookup_map"]
+    subdoc_reg = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
-        "club_id": lookup_data["clubs"].get(doc.get("club_id")),
+        "club_id": lookup_map["clubs"].get(doc.get("club_id")),
         "topic_name": doc.get("topic_name"),
         "topic_description": doc.get("topic_description"),
-        "created_by": lookup_data["users"].get(doc.get("created_by")),
+        "created_by": lookup_map["users"].get(doc.get("created_by")),
         "timestamp": doc.get("timestamp"),
-        "comments": make_subdocuments(
-            doc.get("comments"), "club_discussions", subdoc_registry, separator="|"),
-        "book_reference": lookup_data["books"].get(doc.get("book_reference"))
+        "comments": make_subdocuments(doc.get("comments"), "club_discussions", subdoc_reg, "|"),
+        "book_reference": lookup_map["books"].get(doc.get("book_reference"))
     }
 
 def transform_club_events(doc, *, context):
-    """
-    Transforms a club_events document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
+    """Transforms a club_events document to the desired structure."""
+    lookup_map = context["lookup_map"]
 
     return {
         "_id": doc.get("_id"),
-        "club_id": lookup_data["clubs"].get(doc.get("club_id")),
+        "club_id": lookup_map["clubs"].get(doc.get("club_id")),
         "name": doc.get("name"),
         "description": doc.get("description"),
         "type": doc.get("type"),
         "startdate": doc.get("startdate"),
         "enddate": doc.get("enddate"),
         "status": doc.get("status"),
-        "created_by": lookup_data["users"].get(doc.get("created_by")),
-        "date_added": str(datetime.now())
+        "created_by": lookup_map["users"].get(doc.get("created_by")),
+        "date_added": str(datetime.now(timezone.utc))
     }
 
 def transform_club_reading_periods(doc, *, context):
-    """
-    Transforms a club_reading_periods document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
+    """Transforms a club_reading_periods document to the desired structure."""
+    lookup_map = context["lookup_map"]
 
     return {
         "_id": doc.get("_id"),
-        "club_id": lookup_data["clubs"].get(doc.get("club_id")),
+        "club_id": lookup_map["clubs"].get(doc.get("club_id")),
         "name": doc.get("name"),
         "description": doc.get("description"),
         "startdate": doc.get("startdate"),
         "enddate": doc.get("enddate"),
         "status": doc.get("period_status"),
         "max_books": to_int(doc.get("max_books")),
-        "created_by": lookup_data["users"].get(doc.get("created_by")),
-        "date_added": str(datetime.now())
+        "created_by": lookup_map["users"].get(doc.get("created_by")),
+        "date_added": str(datetime.now(timezone.utc))
     }
 
 def transform_club_badges(doc, *, context):
-    """
-    Transforms a club_badges document to the desired structure.
-    """
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a club_badges document to the desired structure."""
+    subdoc_reg = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
         "name": doc.get("name"),
         "category": doc.get("category"),
-        "tiers": make_subdocuments(
-            doc.get("tiers"), "tiers", subdoc_registry, separator="|"),
+        "tiers": make_subdocuments(doc.get("tiers"), "tiers", subdoc_reg, "|"),
         "description": doc.get("description"),
-        "date_added": str(datetime.now())
+        "date_added": str(datetime.now(timezone.utc))
+    }
+
+def transform_club_event_types(doc, *, context=None):
+    """Transforms a club_event_types document to the desired structure."""
+    return {
+        "_id": doc.get("et_id"),
+        "name": doc.get("name"),
+        "category": doc.get("category"),
+        "description": doc.get("description"),
+    }
+
+def transform_club_event_statuses(doc, *, context=None):
+    """Transforms a club_event_statuses document to the desired structure."""
+    return {
+        "_id": doc.get("es_id"),
+        "name": doc.get("name"),
+        "description": doc.get("description"),
     }
 
 def transform_clubs(doc, *, context):
-    """
-    Transforms a clubs document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a clubs document to the desired structure."""
+    lookup_map = context["lookup_map"]
+    subdoc_reg = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
@@ -496,22 +410,17 @@ def transform_clubs(doc, *, context):
         "description": doc.get("description"),
         "visibility": doc.get("visibility"),
         "rules": doc.get("rules"),
-        "moderators": [lookup_data["users"].get(user) for user
-                            in to_array(doc.get("moderators"))],
-        "badges": make_subdocuments(doc.get("badges"), "club_badges",
-                                    subdoc_registry, separator='|'),
+        "moderators": [lookup_map["users"].get(user) for user in to_array(doc.get("moderators"))],
+        "badges": make_subdocuments(doc.get("badges"), "club_badges", subdoc_reg, '|'),
         "member_permissions": to_array(doc.get("member_permissions")),
-        "join_requests": make_subdocuments(doc.get("join_requests"), "join_requests",
-                                           subdoc_registry, separator=";"),
-        "created_by": lookup_data["users"].get(doc.get("created_by")),
+        "join_requests": make_subdocuments(doc.get("join_requests"),"join_requests",subdoc_reg,";"),
+        "created_by": lookup_map["users"].get(doc.get("created_by")),
     }
 
 def transform_user_reads(doc, *, context):
-    """
-    Transforms a user_reads document to the desired structure.
-    """
-    lookup_data = context["lookup_data"]
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a user_reads document to the desired structure."""
+    lookup_map = context["lookup_map"]
+    subdoc_reg = context["subdoc_registry"]
 
     # Modify doc
     book_versions = context["book_versions"]
@@ -519,11 +428,10 @@ def transform_user_reads(doc, *, context):
 
     return {
         "_id": doc.get("_id"),
-        "user_id": resolve_lookup('users', doc.get("user_id"), lookup_data),
-        "version_id": resolve_lookup('book_versions', doc.get("version_id"), lookup_data),
-        "rstatus": resolve_lookup('read_statuses', doc.get("rstatus_id"), lookup_data),
-        "reading_log": make_subdocuments(doc.get("reading_log"), 'reading_log',
-                                             subdoc_registry, separator=','),
+        "user_id": resolve_lookup('users', doc.get("user_id"), lookup_map),
+        "version_id": resolve_lookup('book_versions', doc.get("version_id"), lookup_map),
+        "rstatus": resolve_lookup('read_statuses', doc.get("rstatus_id"), lookup_map),
+        "reading_log": make_subdocuments(doc.get("reading_log"), 'reading_log', subdoc_reg, ','),
         "date_started": doc.get("date_started"),
         "date_completed": doc.get("date_completed"),
         "days_to_read": doc.get("days_to_read"),
@@ -534,38 +442,39 @@ def transform_user_reads(doc, *, context):
     }
 
 def transform_user_roles(doc, *, context):
-    """
-    Transforms a user_roles document to the desired structure.
-    """
+    """Transforms a user_roles document to the desired structure."""
     return {
         "_id": doc.get("role_id"),
         "name": doc.get("name"),
         "permissions": to_array(doc.get("permissions")),
         "description": doc.get("description"),
-        "date_added": str(datetime.now())
+        "date_added": str(datetime.now(timezone.utc))
     }
 
 def transform_user_badges(doc, *, context):
-    """
-    Transforms a user_badges document to the desired structure.
-    """
+    """Transforms a user_badges document to the desired structure."""
     subdoc_registry = context["subdoc_registry"]
 
     return {
         "_id": doc.get("_id"),
         "name": doc.get("name"),
         "category": doc.get("category"),
-        "tiers": make_subdocuments(
-            doc.get("tiers"), "tiers", subdoc_registry, separator="|"),
+        "tiers": make_subdocuments( doc.get("tiers"), "tiers", subdoc_registry, "|"),
         "description": doc.get("description"),
-        "date_added": str(datetime.now())
+        "date_added": str(datetime.now(timezone.utc))
+    }
+
+def transform_user_permissions(doc, *, context):
+    """Transforms a user_permissions document to the desired structure."""
+    return {
+        "_id": doc.get("permission_id"),
+        "name": doc.get("name"),
+        "description": doc.get("description"),
     }
 
 def transform_users(doc, *, context):
-    """
-    Transforms a user document to the desired structure.
-    """
-    subdoc_registry = context["subdoc_registry"]
+    """Transforms a user document to the desired structure."""
+    subdoc_reg = context["subdoc_registry"]
     key_version = latest_key_version
 
     return {
@@ -582,14 +491,11 @@ def transform_users(doc, *, context):
         "state": encrypt_pii(doc.get("state"), version=key_version),
         "country": encrypt_pii(doc.get("country"), version=key_version),
         "bio": doc.get("bio"),
-        "reading_goal": make_subdocuments(doc.get("reading_goal"), 'reading_goal',
-                                             subdoc_registry, separator='|'),
-        "badges": make_subdocuments(doc.get("badges"), "user_badges",
-                                             subdoc_registry, separator='|'),
+        "reading_goal": make_subdocuments(doc.get("reading_goal"), 'reading_goal', subdoc_reg, '|'),
+        "badges": make_subdocuments(doc.get("badges"), "user_badges", subdoc_reg, '|'),
         "preferred_genres": to_array(doc.get("preferred_genres")),
         "forbidden_genres": to_array(doc.get("forbidden_genres")),
-        "clubs": make_subdocuments(doc.get("clubs"), 'clubs',
-                                        subdoc_registry, separator='|'),
+        "clubs": make_subdocuments(doc.get("clubs"), 'clubs', subdoc_reg, '|'),
         "date_joined": doc.get("date_joined"),
         "last_active_date": doc.get("last_active_date"),
         "is_admin": bool(doc.get("is_admin", False)),
@@ -597,9 +503,7 @@ def transform_users(doc, *, context):
     }
 
 def transform_creators(doc, *, context):
-    """
-    Transforms a creators document to the desired structure.
-    """
+    """Transforms a creators document to the desired structure."""
     return {
         "_id": doc.get("_id"),
         "creator_id": doc.get("creator_id"),
@@ -608,13 +512,11 @@ def transform_creators(doc, *, context):
         "bio": doc.get("bio"),
         "website": doc.get("website"),
         "roles": to_array(doc.get("roles")),
-        "date_added": str(datetime.now())
+        "date_added": str(datetime.now(timezone.utc))
     }
 
 def transform_awards(doc, *, context):
-    """
-    Transforms an awards document to the desired structure.
-    """
+    """Transforms an awards document to the desired structure."""
     return {
         "_id": doc.get("_id"),
         "name": doc.get("name"),
@@ -627,45 +529,96 @@ def transform_awards(doc, *, context):
         "year_ended": to_int(doc.get("year_ended"))
     }
 
+def transform_tags(doc, *, context):
+    """Transforms a tags document to the desired structure."""
+    return {
+        "_id": doc.get("_id"),
+        "name": doc.get("name"),
+    }
 
-# MAPS
+def transform_genres(doc, *, context):
+    """Transforms a genres document to the desired structure."""
+    return {
+        "_id": doc.get("_id"),
+        "name": doc.get("name"),
+    }
 
-# Raw collections to remove custom id fields from
-cleanup_map = {
-    "genres": "genre_id",
-    "publishers": "publisher_id",
-    "tags": "tag_id",
-}
+def transform_publishers(doc, *, context):
+    """Transforms a publishers document to the desired structure."""
+    return {
+        "_id": doc.get("_id"),
+        "name": doc.get("name"),
+        "description": doc.get("description"),
+        "url": doc.get("url"),
+    }
 
-# Raw collections to set _id to custom id
-custom_id_map = {
-    "formats": "format_id",
-    "languages": "language_id",
-    "creator_roles": "cr_id",
-    "read_statuses": "rstatus_id",
-    "club_event_types": "event_type_id",
-    "club_event_statuses": "event_status_id",
-    "user_permissions": "permission_id",
-    "countries": "country_id"
-}
+def transform_formats(doc, *, context):
+    """Transforms a formats document to the desired structure."""
+    return {
+        "_id": doc.get("format_id"),
+        "name": doc.get("name"),
+    }
 
-# Collections to transform with collections specific functions
+def transform_languages(doc, *, context):
+    """Transforms a languages document to the desired structure."""
+    return {
+        "_id": doc.get("language_id"),
+        "name": doc.get("name"),
+        "code":	doc.get("code"),
+        "class": doc.get("class"),
+    }
+
+def transform_creator_roles(doc, *, context):
+    """Transforms a creator_roles document to the desired structure."""
+    return {
+        "_id": doc.get("cr_id"),
+        "name": doc.get("name"),
+    }
+
+def transform_read_statuses(doc, *, context):
+    """Transforms a read_statuses document to the desired structure."""
+    return {
+        "_id": doc.get("rstatus_id"),
+        "name": doc.get("name"),
+    }
+
+def transform_countries(doc, *, context):
+    """Transforms a countries document to the desired structure."""
+    return {
+        "_id": doc.get("country_id"),
+        "name": doc.get("name"),
+        "continent": doc.get("continent"),
+    }
+
+
+# TRANSFORM MAP
 transform_map = {
     "club_members": transform_club_members,
     "club_member_reads": transform_club_member_reads,
     "club_period_books": transform_club_period_books,
     "club_discussions": transform_club_discussions,
     "club_events": transform_club_events,
+    "club_event_types": transform_club_event_types,
+    "club_event_statuses": transform_club_event_statuses,
     "club_reading_periods": transform_club_reading_periods,
     "club_badges": transform_club_badges,
     "clubs": transform_clubs,
     "user_reads": transform_user_reads,
     "user_roles": transform_user_roles,
     "user_badges": transform_user_badges,
+    "user_permissions": transform_user_permissions,
     "users": transform_users,
     "books": transform_books,
     "book_versions": transform_book_versions,
     "book_series": transform_book_series,
     "creators": transform_creators,
     "awards": transform_awards,
+    "formats": transform_formats,
+    "languages": transform_languages,
+    "creator_roles": transform_creator_roles,
+    "read_statuses": transform_read_statuses,
+    "countries": transform_countries,
+    "genres": transform_genres,
+    "publishers": transform_publishers,
+    "tags": transform_tags,
 }

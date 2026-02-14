@@ -21,18 +21,31 @@ def sync_deletions(driver, db, since):
     # Group IDs by their Neo4j label using the provided map
     label_groups = defaultdict(list)
     for doc in deletions:
-        coll_name = doc.get("original_collection")
-        label = collection_label_map.get(coll_name)
-        if label:
-            label_groups[label].append(str(doc["_id"]))
+        collection_name = doc.get("original_collection")
+        original_id = doc.get("original_id")
+
+        if not collection_name or not original_id:
+            logger.warning(f"Skipping malformed deletion record: {doc}.")
+            continue
+
+        label = collection_label_map.get(collection_name)
+        if not label:
+            logger.warning(f"No Neo4j label mapped for collection '{collection_name}'.")
+            continue
+
+        label_groups[label].append(str(doc["_id"]))
 
     # Execute batch deletions in AuraDB
     try:
         with driver.session() as session:
             for label, ids in label_groups.items():
                 query = f"MATCH (n:{label}) WHERE n._id IN $ids DETACH DELETE n"
+
+                logger.debug(f"Deleting {len(ids)} nodes with label '{label}'")
+
                 result = session.run(query, ids=ids)
                 summary = result.consume()
+
                 logger.success(
                     f"Deleted {summary.counters.nodes_deleted} '{label}' nodes "
                     f"({summary.counters.relationships_deleted} relationships)"
@@ -270,13 +283,13 @@ def user_reads_relationships(tx, user_reads):
     MATCH (u:User {_id: row.user_id})
     MATCH (b:BookVersion {_id: row.version_id})
     CALL apoc.merge.relationship(u, row.rel_type, {}, {}, b) YIELD rel
-    SET rel.mostRecentStart = row.most_recent_start,
-        rel.mostRecentRead  = row.most_recent_read,
-        rel.mostRecentReview = row.most_recent_review,
-        rel.readCount       = row.read_count,
-        rel.avgRating       = row.avg_rating,
-        rel.avgDaysToRead   = row.avg_days_to_read,
-        rel.avgReadRate     = row.avg_read_rate
+    SET rel.most_recent_start   = row.most_recent_start,
+        rel.most_recent_read    = row.most_recent_read,
+        rel.most_recent_review  = row.most_recent_review,
+        rel.read_count          = row.read_count,
+        rel.avg_rating          = row.avg_rating,
+        rel.avg_days_to_read    = row.avg_days_to_read,
+        rel.avg_read_rate       = row.avg_read_rate
     """
     tx.run(merge_query, rows=rows)
     logger.info(f"Updated reading status for {len(rows)} User-BookVersion pairs.")
@@ -353,8 +366,8 @@ def club_book_relationships(tx, club_period_books):
         MATCH (c:Club {_id: row.club_id})
         MATCH (b:Book {_id: row.book_id})
         MERGE (c)-[rel:SELECTED_FOR_PERIOD]->(b)
-        SET rel.period = row.period, rel.startDate = row.startdate,
-            rel.endDate = row.enddate, rel.selectionMethod = row.selection_method
+        SET rel.period = row.period, rel.startdate = row.startdate,
+            rel.enddate = row.enddate, rel.selection_method = row.selection_method
         """
         tx.run(merge_query, rows=merge_rows)
 

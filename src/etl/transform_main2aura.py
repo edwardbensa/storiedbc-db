@@ -25,10 +25,10 @@ class AuraTransformPipeline:
     def __init__(self, workers: int = 8):
         self.db = connect_mongodb()
         self.etl_db = connect_mongodb("etl_metadata")
-        self.timestamp = datetime.datetime.now()
+        self.timestamp = datetime.datetime.now(datetime.timezone.utc)
         self.batch_id = time.strftime("%Y%m%d-%H%M%S")
         self.workers = workers
-        self.last_sync_time = load_sync_state(self.etl_db, self.SYNC_KEY)
+        self.lst = load_sync_state(self.etl_db, self.SYNC_KEY)
         self.output_dir = Path(AURA_COLL_DIR)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,10 +102,9 @@ class AuraTransformPipeline:
     def extract(self):
         """Extract and transform all required collections from MongoDB."""
         start = time.time()
-        lst = self.last_sync_time
 
         # Extraction configs
-        tasks = build_extraction_config(db=self.db, lst=lst)
+        tasks = build_extraction_config(db=self.db, lst=self.lst)
 
         results = {}
 

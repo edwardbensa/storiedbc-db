@@ -3,7 +3,7 @@
 # Imports
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from loguru import logger
@@ -22,7 +22,7 @@ class SheetSyncPipeline:
         self.id_map = id_map
         self.dry_run = dry_run
         self.workers = min(workers, 5)
-        self.timestamp = datetime.now()
+        self.timestamp = datetime.now(timezone.utc)
         self.batch_id = time.strftime("%Y%m%d-%H%M%S")
 
         self.avg_latency = 0

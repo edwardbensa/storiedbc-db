@@ -4,7 +4,7 @@
 import time
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tqdm import tqdm
@@ -25,7 +25,7 @@ class LoadMongoPipeline:
         self.directory = Path(directory or MAIN_COLL_DIR)
         self.dry_run = dry_run
         self.workers = workers
-        self.timestamp = datetime.now()
+        self.timestamp = datetime.now(timezone.utc)
         self.batch_id = time.strftime("%Y%m%d-%H%M%S")
 
     # Core load operations
