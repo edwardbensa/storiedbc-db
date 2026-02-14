@@ -1,5 +1,72 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
 .env
-.git/
-etl_logs/
+.env.local
+.env.*.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data
+data/
+logs/
+*.log
+*.csv
+*.json
+!requirements.txt
+!pyproject.toml
+
+# Secrets
+secrets/
+*.pem
+*.key
+*.crt
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+!Dockerfile.etl
+
+# Tests
+tests/
+*.test.py
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
