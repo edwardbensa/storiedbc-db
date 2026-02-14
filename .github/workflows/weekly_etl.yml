@@ -33,16 +33,23 @@ jobs:
           cat << 'EOF' > src/secrets/key_registry.json
           ${{ secrets.ENCRYPTION_KEYS_JSON }}
           EOF
+      
+      - name: Debug .env and secrets
+        run: |
+          echo "PWD: $(pwd)"
+          echo "--- Listing root ---"
+          ls -al .
+          echo "--- .env contents (with invisible chars) ---"
+          sed -n l .env
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build and Run ETL
-        run: |
-          # Use docker-compose to build and run
-          # This will trigger the model download during the build
-          docker compose up --build --abort-on-container-exit
+        working-directory: ${{ github.workspace }}
+        run: docker compose up --build --abort-on-container-exit
 
       - name: Cleanup
         if: always()
+        working-directory: ${{ github.workspace }}
         run: docker compose down -v
