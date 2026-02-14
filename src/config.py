@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-gsheet_cred = os.getenv("GSHEET_CRED")
+gsheet_cred = os.getenv("GSHEET_CREDS")
 mongodb_uri = os.getenv("MONGODB_URI")
 azure_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 neo4j_uri = os.getenv("NEO4J_URI")

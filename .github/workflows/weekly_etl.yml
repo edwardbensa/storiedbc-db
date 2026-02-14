@@ -1,4 +1,4 @@
-name: Weekly Book Club ETL
+name: Weekly SBC ETL
 
 on:
   schedule:
@@ -20,11 +20,14 @@ jobs:
           mkdir -p src/secrets
           
           # Write the .env file to the root
-          echo "${{ secrets.ENV_FILE }}" > .env
+          cat << 'EOF' > .env
+          ${{ secrets.ENV_FILE }}
+          EOF
           
-          # Write the Google Sheets credentials JSON
-          # Ensure the filename matches what's in your src.config
-          echo "${{ secrets.GSHEET_CRED_JSON }}" > src/secrets/gsheet_creds.json
+          # Write the Google Sheets credentials JSON to src/secrets
+          cat << 'EOF' > src/secrets/gsheet_creds.json
+          ${{ secrets.GSHEET_CRED_JSON }}
+          EOF
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
