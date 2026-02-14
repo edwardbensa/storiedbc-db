@@ -29,6 +29,11 @@ jobs:
           ${{ secrets.GSHEET_CRED_JSON }}
           EOF
 
+          # Write the local encryption keys JSON to src/secrets
+          cat << 'EOF' > src/secrets/key_registry.json
+          ${{ secrets.ENCRYPTION_KEYS }}
+          EOF
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
