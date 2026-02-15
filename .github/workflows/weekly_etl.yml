@@ -35,8 +35,8 @@ jobs:
           ls -al .
           echo "--- .env contents (with invisible chars) ---"
           sed -n l .env
-          echo "--- gsheet_creds.json ---"
-          sed -n l src/secrets/gsheet_creds.json
+          echo "--- gsheets_creds.json ---"
+          sed -n l src/secrets/gsheets_creds.json
           echo "--- key_registry.json ---"
           sed -n l src/secrets/key_registry.json
 
