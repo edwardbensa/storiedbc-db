@@ -20,13 +20,13 @@ jobs:
           mkdir -p src/secrets
           
           # Write the .env file to the root
-          echo "${{ secrets.ENV_FILE }}" > .env
+          printf "%s" "${{ secrets.ENV_FILE }}" > .env
           
           # Write the Google Sheets credentials JSON to src/secrets
-          echo '${{ secrets.GSHEET_CRED_JSON }}' > src/secrets/gsheet_creds.json
+          printf "%s" "${{ secrets.GSHEET_CRED_JSON }}" > src/secrets/gsheet_creds.json
 
           # Write the local encryption keys JSON to src/secrets
-          echo '${{ secrets.ENCRYPTION_KEYS_JSON }}' > src/secrets/key_registry.json
+          printf "%s" "${{ secrets.ENCRYPTION_KEYS_JSON }}" > src/secrets/key_registry.json
       
       - name: Debug .env and secrets
         run: |
@@ -35,6 +35,10 @@ jobs:
           ls -al .
           echo "--- .env contents (with invisible chars) ---"
           sed -n l .env
+          echo "--- gsheet_creds.json ---"
+          sed -n l src/secrets/gsheet_creds.json
+          echo "--- key_registry.json ---"
+          sed -n l src/secrets/key_registry.json
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
