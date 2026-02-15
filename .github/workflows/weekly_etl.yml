@@ -16,12 +16,10 @@ jobs:
 
       - name: Reconstruct Config Files
         run: |
-          # Create the secrets directory
           mkdir -p src/secrets
-          
-          printf "%s" "${{ secrets.ENV_FILE }}" > .env
-          printf "%s" "${{ secrets.GSHEET_CREDS_JSON }}" > src/secrets/gsheets_creds.json
-          printf "%s" "${{ secrets.ENCRYPTION_KEYS_JSON }}" > src/secrets/key_registry.json
+          printf '%s' '${{ secrets.GSHEET_CREDS_JSON }}' > src/secrets/gsheets_creds.json
+          printf '%s' '${{ secrets.ENCRYPTION_KEYS_JSON }}' > src/secrets/key_registry.json
+          printf '%s' '${{ secrets.ENV_FILE }}' > .env
       
       - name: Debug .env and secrets
         run: |
@@ -30,6 +28,9 @@ jobs:
           ls -al .
           echo "--- File sizes ---"
           wc -c .env src/secrets/gsheets_creds.json src/secrets/key_registry.json
+          echo "--- Validate JSON ---"
+          python3 -m json.tool src/secrets/gsheets_creds.json > /dev/null && echo "gsheets OK" || echo "gsheets INVALID"
+          python3 -m json.tool src/secrets/key_registry.json > /dev/null  && echo "keys OK"    || echo "keys INVALID"
           echo "--- .env contents (with invisible chars) ---"
           sed -n l .env
           echo "--- gsheets_creds.json ---"
