@@ -23,7 +23,7 @@ jobs:
           printf "%s" "${{ secrets.ENV_FILE }}" > .env
           
           # Write the Google Sheets credentials JSON to src/secrets
-          printf "%s" "${{ secrets.GSHEET_CRED_JSON }}" > src/secrets/gsheet_creds.json
+          printf "%s" "${{ secrets.GSHEETS_CRED_JSON }}" > src/secrets/gsheet_creds.json
 
           # Write the local encryption keys JSON to src/secrets
           printf "%s" "${{ secrets.ENCRYPTION_KEYS_JSON }}" > src/secrets/key_registry.json
