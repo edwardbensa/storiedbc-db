@@ -19,24 +19,17 @@ jobs:
           # Create the secrets directory
           mkdir -p src/secrets
           
-          # Write the .env file to the root
           printf "%s" "${{ secrets.ENV_FILE }}" > .env
-          
-          # Write the Google Sheets credentials JSON to src/secrets
-          cat << 'EOF' > src/secrets/gsheets_creds.json
-          ${{ secrets.GSHEET_CREDS_JSON }}
-          EOF
-
-          # Write the local encryption keys JSON to src/secrets
-          cat << 'EOF' > src/secrets/key_registry.json
-          ${{ secrets.ENCRYPTION_KEYS_JSON }}
-          EOF
+          printf "%s" "${{ secrets.GSHEET_CREDS_JSON }}" > src/secrets/gsheets_creds.json
+          printf "%s" "${{ secrets.ENCRYPTION_KEYS_JSON }}" > src/secrets/key_registry.json
       
       - name: Debug .env and secrets
         run: |
           echo "PWD: $(pwd)"
           echo "--- Listing root ---"
           ls -al .
+          echo "--- File sizes ---"
+          wc -c .env src/secrets/gsheets_creds.json src/secrets/key_registry.json
           echo "--- .env contents (with invisible chars) ---"
           sed -n l .env
           echo "--- gsheets_creds.json ---"
