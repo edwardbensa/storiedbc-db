@@ -17,26 +17,19 @@ jobs:
       - name: Reconstruct Config Files
         run: |
           mkdir -p src/secrets
-          printf '%s' '${{ secrets.GSHEET_CREDS_JSON }}' > src/secrets/gsheets_creds.json
-          printf '%s' '${{ secrets.ENCRYPTION_KEYS_JSON }}' > src/secrets/key_registry.json
-          printf '%s' '${{ secrets.ENV_FILE }}' > .env
-      
+          echo "${{ secrets.ENV_FILE }}" | base64 -d > .env
+          echo "${{ secrets.GSHEET_CREDS_JSON }}" | base64 -d > src/secrets/gsheets_creds.json
+          echo "${{ secrets.ENCRYPTION_KEYS_JSON }}" | base64 -d > src/secrets/key_registry.json
+
       - name: Debug .env and secrets
         run: |
-          echo "PWD: $(pwd)"
-          echo "--- Listing root ---"
-          ls -al .
-          echo "--- File sizes ---"
-          wc -c .env src/secrets/gsheets_creds.json src/secrets/key_registry.json
-          echo "--- Validate JSON ---"
-          python3 -m json.tool src/secrets/gsheets_creds.json > /dev/null && echo "gsheets OK" || echo "gsheets INVALID"
-          python3 -m json.tool src/secrets/key_registry.json > /dev/null  && echo "keys OK"    || echo "keys INVALID"
-          echo "--- .env contents (with invisible chars) ---"
-          sed -n l .env
-          echo "--- gsheets_creds.json ---"
-          sed -n l src/secrets/gsheets_creds.json
-          echo "--- key_registry.json ---"
-          sed -n l src/secrets/key_registry.json
+          echo "Checking file existence and integrity..."
+          [ -f .env ] && echo ".env exists"
+          # Validate JSON
+          python3 -m json.tool src/secrets/gsheets_creds.json > /dev/null && echo "gsheets JSON valid"
+          python3 -m json.tool src/secrets/key_registry.json > /dev/null  && echo "keys JSON valid"
+          # Check byte counts to ensure files aren't empty
+          wc -c .env src/secrets/*.json
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
