@@ -70,3 +70,14 @@ tests/
 
 # Windows
 Thumbs.db
+
+# Secret files
+secrets/
+
+# Other
+_template/
+_deprecated/
+data
+modeling/
+_deprecated/
+_testing/

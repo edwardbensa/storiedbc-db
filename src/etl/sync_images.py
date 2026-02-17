@@ -39,5 +39,5 @@ def run_image_sync(collection, url_field, img_type, container_name):
 
 
 if __name__ == "__main__":
-    run_image_sync("book_versions", "cover_url", "cover", "cover-art")
+    run_image_sync("book_versions", "cover_url", "cover", "covers")
     close_mongodb()

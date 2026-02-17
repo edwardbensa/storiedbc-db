@@ -12,7 +12,6 @@ def run_script(script_path):
     """Runs a script and returns the exit code."""
     logger.info(f">>> Starting: {script_path}")
     try:
-        # We use the return code to decide the next move
         process = subprocess.run([sys.executable, script_path], check=False, text=True)
         return process.returncode
     except Exception as e:  # pylint: disable=W0718
