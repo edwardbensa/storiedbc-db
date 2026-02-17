@@ -27,7 +27,7 @@ from neo4j.exceptions import (
 )
 from loguru import logger
 from src.config import (
-    gsheet_cred, mongodb_uri, azure_str,
+    gsheet_cred, mongodb_uri, azure_conte,
     neo4j_uri, neo4j_user, neo4j_pwd
     )
 from .ops_mongo import load_sync_state, update_sync_state
@@ -84,9 +84,7 @@ def close_mongodb():
 
 
 def connect_auradb():
-    """
-    Connects to Neo4j AuraDB and creates a driver.
-    """
+    """Connects to Neo4j AuraDB and creates a driver."""
     if neo4j_uri is None or neo4j_user is None or neo4j_pwd is None:
         raise ValueError("neo4j_user and neo4j_pwd must not be None")
     uri = neo4j_uri
@@ -104,31 +102,14 @@ def connect_auradb():
 
 
 def connect_azure_blob():
-    """
-    Connects to Azure Blob Storage and returns BlobServiceClient.
-    """
+    """Connects to Azure Blob Storage and returns BlobServiceClient."""
     try:
-        blob_service_client = BlobServiceClient.from_connection_string(azure_str) # type: ignore
+        blob_service_client = BlobServiceClient.from_connection_string(azure_conte) # type: ignore
         logger.info("Successfully connected to Azure Blob Storage.")
         return blob_service_client
     except (ConnectionFailure, ConfigurationError) as e:
         logger.error(f"Failed to connect to Azure Blob Storage: {e}")
         sys.exit()
-
-
-def make_blob_public(container_client, blob_name):
-    """
-    Sets the access level of a blob to public read.
-    """
-    try:
-        acl = container_client.get_container_access_policy()
-        if acl.get('public_access') != 'blob':
-            container_client.set_container_access_policy(public_access='blob')
-            logger.info(f"Set container access policy to public for blob '{blob_name}'.")
-        else:
-            logger.info(f"Blob '{blob_name}' is already public.")
-    except (KeyError, TypeError, ValueError, AzureError) as e:
-        logger.error(f"Failed to set blob '{blob_name}' to public: {e}")
 
 
 def connect_gsheet():

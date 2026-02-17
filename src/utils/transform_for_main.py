@@ -479,7 +479,6 @@ def transform_users(doc, *, context):
 
     return {
         "_id": doc.get("_id"),
-        "user_id": doc.get("user_id"),
         "handle": doc.get("handle"),
         "firstname": doc.get("firstname"),
         "lastname": doc.get("lastname"),

@@ -12,7 +12,7 @@ from loguru import logger
 from pymongo import UpdateOne
 from pymongo.errors import BulkWriteError, PyMongoError
 from src.utils.connectors import connect_mongodb, close_mongodb, retry
-from src.utils.ops_mongo import update_sync_state
+from src.utils.ops_mongo import load_sync_state, update_sync_state, sync_deletions
 from src.utils.parsers import convert_document
 from src.config import MAIN_COLL_DIR
 
@@ -27,6 +27,7 @@ class LoadMongoPipeline:
         self.workers = workers
         self.timestamp = datetime.now(timezone.utc)
         self.batch_id = time.strftime("%Y%m%d-%H%M%S")
+        self.lst = load_sync_state(connect_mongodb("etl_metadata"), "main_sync")
 
     # Core load operations
     def load_file(self, file_path):
@@ -192,6 +193,11 @@ class LoadMongoPipeline:
 
         logger.success("All transformed collections loaded into MongoDB.")
 
+    @retry(max_attempts=3, backoff=2)
+    def sync_deletions(self):
+        """Sync staging deletions with main."""
+        sync_deletions(staging_db=connect_mongodb("staging"), main_db=self.db, since=self.lst)
+
     # Cleanup
     def close(self):
         """Close MongoDB client."""
@@ -202,4 +208,5 @@ class LoadMongoPipeline:
 if __name__ == "__main__":
     pipeline = LoadMongoPipeline(workers=8)
     pipeline.load_all()
+    pipeline.sync_deletions()
     pipeline.close()
