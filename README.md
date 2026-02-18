@@ -5,7 +5,7 @@ Book Club ETL Pipeline
 An automated data orchestration engine that manages the lifecycle of book club metadata, member reads, and social graphs.
 
 ## Architecture Overview
-The pipeline follows a multi-phase staging strategy to ensure data integrity and minimize downtime:
+The pipeline follows a multi-phase staging strategy to ensure data integrity and minimise downtime:
 
     Phase 1: Extraction (GSheet → MongoDB Staging): Pulls raw data from Google Sheets into a staging environment using dynamic latency-based throttling.
 
@@ -19,7 +19,7 @@ The pipeline follows a multi-phase staging strategy to ensure data integrity and
 
     Graph Orchestration: Automatically manages Neo4j constraints, node upserts, and complex relationship mapping (e.g., USER_READ, MEMBER_OF_CLUB).
 
-    Asset Management: Synchronizes book covers and user avatars directly from source URLs to Azure Blob Storage.
+    Asset Management: Synchronises book covers and user avatars directly from source URLs to Azure Blob Storage.
 
     Infrastructure-Agnostic Config: Implements "Lazy Bootstrapping" via src/config.py to reconstruct .env and secret JSON files from Base64 environment variables at runtime.
 
@@ -38,15 +38,6 @@ The pipeline follows a multi-phase staging strategy to ensure data integrity and
     Language: Python 3.11 (Loguru, Pymongo, Neo4j-Driver, Sentence-Transformers).
 
 ## Setup & Configuration
-Environment Variables
-
-The pipeline requires several Base64-encoded environment variables to reconstruct its configuration files at runtime:
-
-    ENV_FILE_BASE64: Encoded .env file containing database URIs and API keys.
-
-    GSHEET_JSON_BASE64: Encoded Google Service Account JSON.
-
-    KEYS_JSON_BASE64: Encoded encryption key registry for secure data handling.
 
 Local Development
 
